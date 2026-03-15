@@ -73,7 +73,7 @@ _log_handler.setFormatter(logging.Formatter(
 ))
 logger.addHandler(_log_handler)
 
-CURRENCIES  = ["btc", "eth", "ltc", "doge", "trx", "bch", "xrp", "usdt", "bnb", "usdc", "sol", "xlm", "decoy"]
+CURRENCIES  = ["btc", "eth", "ltc", "doge", "trx", "bch", "xrp", "usdt", "bnb", "usdc", "sol", "xlm"]
 
 # ══════════════════════════════════════════════════════════
 #  DATABASE SETUP (delegates to core.database)
