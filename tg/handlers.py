@@ -218,8 +218,11 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for b in balances:
             cur = b.get("currency", "?").upper()
             amt = float(b.get("amount", 0))
+            faucet = float(b.get("faucet_amount", 0))
             if amt > 0:
                 lines.append(f"`{cur:>6}  {amt:.8f}`")
+            if faucet > 0:
+                lines.append(f"`{cur:>6}  {faucet:.8f} (faucet)`")
         if len(lines) == 1:
             lines.append("_No positive balances_")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")

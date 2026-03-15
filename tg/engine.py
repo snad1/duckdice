@@ -162,10 +162,10 @@ class BettingEngine:
         r = self._http.get(self._api_url(f"/bot/stats/{symbol}"), timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         data = r.json()
-        # DuckDice returns user.balance for the queried symbol
-        user = data.get("user", {})
-        balance = float(user.get("balance", 0))
-        return [{"currency": symbol.lower(), "amount": balance}]
+        balances_data = data.get("balances", {})
+        main_bal = float(balances_data.get("main", 0))
+        faucet_bal = float(balances_data.get("faucet", 0))
+        return [{"currency": symbol.lower(), "amount": main_bal, "faucet_amount": faucet_bal}]
 
     def _api_place_bet(self, amount: float) -> Optional[dict]:
         payload = {

@@ -73,7 +73,7 @@ _log_handler.setFormatter(logging.Formatter(
 ))
 logger.addHandler(_log_handler)
 
-CURRENCIES  = ["btc", "eth", "ltc", "doge", "trx", "bch", "xrp", "usdt", "bnb", "usdc", "sol", "xlm"]
+CURRENCIES  = ["btc", "eth", "ltc", "doge", "trx", "bch", "xrp", "usdt", "bnb", "usdc", "sol", "xlm", "decoy"]
 
 # ══════════════════════════════════════════════════════════
 #  DATABASE SETUP (delegates to core.database)
@@ -378,7 +378,10 @@ def _headers() -> dict:
     }
 
 def api_get_balances():
-    """Fetch balances from DuckDice bot stats endpoint."""
+    """Fetch balances from DuckDice bot stats endpoint.
+
+    Returns list of dicts with currency, amount, and optional faucet_amount.
+    """
     symbol = state.currency.upper()
     r = requests.get(_api_url(f"/bot/stats/{symbol}"), headers=_headers(), timeout=12)
     r.raise_for_status()
@@ -387,8 +390,7 @@ def api_get_balances():
     main_bal = float(balances_data.get("main", 0))
     faucet_bal = float(balances_data.get("faucet", 0))
     return [
-        {"currency": state.currency, "amount": main_bal},
-        {"currency": f"{state.currency}_faucet", "amount": faucet_bal},
+        {"currency": state.currency, "amount": main_bal, "faucet_amount": faucet_bal},
     ]
 
 def api_get_user_info():
@@ -1605,8 +1607,12 @@ def setup_wizard():
             for b in balances:
                 amt = float(b["amount"])
                 available_bal[b["currency"]] = amt
-                if amt > 0:
-                    console.print(f"    [yellow]{b['currency'].upper():8s}[/] {amt:.8f}")
+                faucet = float(b.get("faucet_amount", 0))
+                if amt > 0 or faucet > 0:
+                    line = f"    [yellow]{b['currency'].upper():8s}[/] {amt:.8f}"
+                    if faucet > 0:
+                        line += f"  [dim](faucet: {faucet:.8f})[/]"
+                    console.print(line)
             console.print()
 
         v = _ask("Select currency", default=state.currency, choices=CURRENCIES)
