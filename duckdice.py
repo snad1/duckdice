@@ -439,6 +439,31 @@ def api_place_bet(amount: float) -> Optional[dict]:
                     "amount": float(user.get("balance", state.current_balance)),
                 },
             }
+        elif r.status_code == 422:
+            # Validation error — parse minimum bet or stop
+            try:
+                err_data = r.json()
+                err_msg = err_data.get("error", "")
+                params = err_data.get("params", {})
+                min_amount = params.get("amount")
+                if min_amount and "minimum bet" in err_msg.lower():
+                    min_bet = float(min_amount)
+                    logger.warning("MIN BET %.8f — adjusting base_bet and current_bet",
+                                   min_bet)
+                    with state.lock:
+                        state.base_bet = min_bet
+                        state.current_bet = min_bet
+                        state.last_error = f"Min bet adjusted to {min_bet}"
+                        state.status = f"Min bet adjusted to {min_bet:.8f}"
+                    return None
+            except (ValueError, KeyError):
+                pass
+            body = r.text[:500]
+            logger.error("HTTP 422  response=%s  payload=%s", body, json.dumps(payload))
+            with state.lock:
+                state.last_error = f"Validation error: {r.text[:120]}"
+                state.running = False
+                state.stop_reason = f"API validation error: {r.text[:120]}"
         elif r.status_code == 429:
             logger.warning("RATE LIMIT 429 — starting exponential backoff")
             with state.lock:

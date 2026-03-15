@@ -176,7 +176,7 @@ class BettingEngine:
             "faucet": self.faucet,
         }
         try:
-            r = self._http.post(self._api_url("/bot/play"),
+            r = self._http.post(self._api_url("/dice/play"),
                                 json=payload, timeout=REQUEST_TIMEOUT)
             self._consecutive_timeouts = 0  # success — reset
             if r.status_code == 200:
@@ -208,6 +208,23 @@ class BettingEngine:
                         "amount": float(user.get("balance", self.current_balance)),
                     },
                 }
+            elif r.status_code == 422:
+                try:
+                    err_data = r.json()
+                    err_msg = err_data.get("error", "")
+                    params = err_data.get("params", {})
+                    min_amount = params.get("amount")
+                    if min_amount and "minimum bet" in err_msg.lower():
+                        min_bet = float(min_amount)
+                        self.base_bet = min_bet
+                        self.current_bet = min_bet
+                        self.last_error = f"Min bet adjusted to {min_bet}"
+                        return None
+                except (ValueError, KeyError):
+                    pass
+                self.last_error = f"Validation error: {r.text[:120]}"
+                self.running = False
+                self.stop_reason = f"API validation error: {r.text[:120]}"
             elif r.status_code == 429:
                 self.rate_wait = True
                 self.rate_backoff = 2.0
