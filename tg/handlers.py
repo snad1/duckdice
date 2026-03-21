@@ -166,7 +166,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/savepreset \u2014 Save current config\n"
         "/loadpreset \u2014 Load preset\n\n"
         "*Web*\n"
-        "/web \u2014 Open web dashboard",
+        "/web \u2014 Open web dashboard\n"
+        "/benchmark \u2014 Test API response speed",
         parse_mode="Markdown",
     )
 
