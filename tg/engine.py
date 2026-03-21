@@ -103,6 +103,9 @@ class BettingEngine:
         self._consecutive_timeouts = 0
         self.backoff_delay   = 1.0
         self._insufficient_balance = False
+        self._last_api_ms          = 0.0
+        self._api_ms_total         = 0.0
+        self._api_ms_count         = 0
 
         # ── strategy internals ──
         self.dalembert_unit  = 0
@@ -176,8 +179,10 @@ class BettingEngine:
             "faucet": self.faucet,
         }
         try:
+            t0 = time.time()
             r = self._http.post(self._api_url("/dice/play"),
                                 json=payload, timeout=REQUEST_TIMEOUT)
+            self._last_api_ms = (time.time() - t0) * 1000
             self._consecutive_timeouts = 0  # success — reset
             if r.status_code == 200:
                 data = r.json()
@@ -189,6 +194,8 @@ class BettingEngine:
                         return None
                     self.last_error = f"API error: {str(err_msg)[:120]}"
                     return None
+                self._api_ms_total += self._last_api_ms
+                self._api_ms_count += 1
                 # Map DuckDice response to internal format
                 bet = data.get("bet", {})
                 user = data.get("user", {})
@@ -660,6 +667,8 @@ class BettingEngine:
             "currency": self.currency.upper(),
             "status": self.status,
             "last_error": self.last_error,
+            "api_ms": self._last_api_ms,
+            "api_avg_ms": (self._api_ms_total / self._api_ms_count) if self._api_ms_count > 0 else 0,
         }
 
     # ── BETTING LOOP ─────────────────────────────────────
