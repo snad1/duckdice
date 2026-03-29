@@ -57,6 +57,7 @@ PID_PATH     = os.environ.get("DUCKDICE_PID_PATH",     os.path.expanduser("~/.du
 PRESET_PATH  = os.environ.get("DUCKDICE_PRESET_PATH",  os.path.expanduser("~/.duckdice_presets.json"))
 LOG_DIR      = os.environ.get("DUCKDICE_LOG_DIR",      os.path.expanduser("~/.duckdice_logs"))
 VERSION      = "1.0.0"
+APP_ENV      = os.environ.get("APP_ENV", "production")
 
 # ── Daily rotating logger ──
 # Default: WARNING (production). Use --verbose for DEBUG.
@@ -152,7 +153,8 @@ def _load_all_presets() -> dict:
         return {}
 
 def _save_all_presets(presets: dict):
-    with open(PRESET_PATH, "w") as f:
+    fd = os.open(PRESET_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(presets, f, indent=2)
 
 def save_preset(name: str):
@@ -1617,7 +1619,8 @@ def setup_wizard():
             balances = api_get_balances()
             console.print("[green]  Connected![/]\n")
         except Exception as e:
-            console.print(f"[red]  Connection failed: {e}[/]")
+            detail = f": {e}" if APP_ENV != "production" else ""
+            console.print(f"[red]  Connection failed{detail}.[/]")
             console.print("[yellow]  Check your API key and try again.[/]\n")
             state.api_key = ""
             saved_key = ""
@@ -2501,7 +2504,8 @@ def cmd_stop():
         console.print("[yellow]Process already stopped.[/]")
         _cleanup_state_file()
     except Exception as e:
-        console.print(f"[red]Could not stop: {e}[/]")
+        detail = f": {e}" if APP_ENV != "production" else ""
+        console.print(f"[red]Could not stop{detail}.[/]")
 
 # ══════════════════════════════════════════════════════════
 #  --list-presets COMMAND
@@ -2904,7 +2908,8 @@ def _load_and_connect():
         console.print(f"[green]Resumed — {state.strategy} on {state.currency.upper()} "
                       f"@ {state.base_bet:.8f} base bet[/]")
     except Exception as e:
-        console.print(f"[red]Connection failed: {e}[/]")
+        detail = f": {e}" if APP_ENV != "production" else ""
+        console.print(f"[red]Connection failed{detail}. Check your settings and try again.[/]")
         sys.exit(1)
 
 def main():
@@ -3000,7 +3005,8 @@ def main():
                     state.lowest_balance  = bal
                     break
         except Exception as e:
-            console.print(f"[red]Connection failed: {e}[/]")
+            detail = f": {e}" if APP_ENV != "production" else ""
+            console.print(f"[red]Connection failed{detail}. Check your settings and try again.[/]")
             sys.exit(1)
 
     elif args.resume or args.daemon:
