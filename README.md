@@ -30,10 +30,10 @@ duckdice/
 │   └── routes/         API, admin, user, auth, WebSocket routes
 ├── install.sh          Server installer (systemd, duckctl, venv)
 ├── .env.example        Environment variable template
-└── requirements.txt    Python dependencies
+└── requirements.txt    Python dependencies (includes casino-shared)
 ```
 
-Both the CLI bot and Telegram bot import shared logic from `core/` — change once, applies everywhere.
+Both the CLI bot and Telegram bot import shared logic from `core/` — change once, applies everywhere. Cross-bot shared code (`shared/`) is installed as a pip package (`casino-shared`) from GitHub.
 
 ---
 
