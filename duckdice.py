@@ -56,7 +56,7 @@ STATE_PATH   = os.environ.get("DUCKDICE_STATE_PATH",   os.path.expanduser("~/.du
 PID_PATH     = os.environ.get("DUCKDICE_PID_PATH",     os.path.expanduser("~/.duckdice_autobot.pid"))
 PRESET_PATH  = os.environ.get("DUCKDICE_PRESET_PATH",  os.path.expanduser("~/.duckdice_presets.json"))
 LOG_DIR      = os.environ.get("DUCKDICE_LOG_DIR",      os.path.expanduser("~/.duckdice_logs"))
-VERSION      = "1.0.5"
+VERSION      = "1.0.6"
 APP_ENV      = os.environ.get("APP_ENV", "production")
 
 # ── Daily rotating logger ──
@@ -687,8 +687,7 @@ def betting_loop():
             elapsed = now - state.session_start
             if elapsed > 0:
                 state.bets_per_second = state.total_bets / elapsed
-                # BPM = actual bets in the current minute (real count, not extrapolated)
-                state.bets_per_minute = state._bets_this_min
+                state.bets_per_minute = state.bets_per_second * 60
 
             # track peak/low bets per individual second and minute
             sec_key = int(now)
