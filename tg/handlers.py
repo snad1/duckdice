@@ -224,32 +224,30 @@ async def cmd_benchmark(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.message.reply_text(f"Running {count} test bets (faucet mode)...")
 
-    import requests as _req
+    import httpx as _httpx
     import time as _time
     from .config import API_BASE
 
-    session = _req.Session()
-    session.headers.update({"Content-Type": "application/json"})
+    _timeout = _httpx.Timeout(15.0, connect=5.0)
     currency = (config.get("currency") or "btc").upper()
     times = []
 
-    for i in range(count):
-        payload = {
-            "symbol": currency,
-            "chance": "49.5",
-            "isHigh": False,
-            "amount": "0",
-            "faucet": True,
-        }
-        try:
-            t0 = _time.time()
-            r = session.post(f"{API_BASE}/dice/play?api_key={api_key}", json=payload, timeout=(5, 15))
-            elapsed = (_time.time() - t0) * 1000
-            times.append(elapsed)
-        except Exception:
-            times.append(-1)
-
-    session.close()
+    async with _httpx.AsyncClient(headers={"Content-Type": "application/json"}, timeout=_timeout) as client:
+        for i in range(count):
+            payload = {
+                "symbol": currency,
+                "chance": "49.5",
+                "isHigh": False,
+                "amount": "0",
+                "faucet": True,
+            }
+            try:
+                t0 = _time.time()
+                r = await client.post(f"{API_BASE}/dice/play?api_key={api_key}", json=payload)
+                elapsed = (_time.time() - t0) * 1000
+                times.append(elapsed)
+            except Exception:
+                times.append(-1)
 
     valid = [t for t in times if t > 0]
     if not valid:
@@ -287,7 +285,7 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Fetching balance...")
     try:
         engine = BettingEngine(user_id, "", api_key, config)
-        balances = engine.api_get_balances()
+        balances = await engine.api_get_balances()
         if not balances:
             await update.message.reply_text("No balance found or API key invalid.")
             return
@@ -623,27 +621,25 @@ async def cmd_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     slot = _alloc_slot(user_id)
 
-    # Set up async callbacks from betting thread
-    loop = asyncio.get_event_loop()
     chat_id = update.effective_chat.id
     app = context.application
 
     def _make_on_stop(cid, uid, s):
         def on_stop(reason):
-            asyncio.run_coroutine_threadsafe(
-                _notify_stop(cid, uid, s, reason, app), loop)
+            asyncio.ensure_future(
+                _notify_stop(cid, uid, s, reason, app))
         return on_stop
 
     def _make_on_milestone(cid):
         def on_milestone(data):
-            asyncio.run_coroutine_threadsafe(
-                _notify_milestone(cid, data, app), loop)
+            asyncio.ensure_future(
+                _notify_milestone(cid, data, app))
         return on_milestone
 
     def _make_on_error(cid):
         def on_error(msg):
-            asyncio.run_coroutine_threadsafe(
-                _notify_error(cid, msg, app), loop)
+            asyncio.ensure_future(
+                _notify_error(cid, msg, app))
         return on_error
 
     engine.on_stop = _make_on_stop(chat_id, user_id, slot)
@@ -652,7 +648,7 @@ async def cmd_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.message.reply_text("Connecting to DuckDice...")
 
-    if not engine.start():
+    if not await engine.start():
         detail = f": {engine.last_error}" if APP_ENV != "production" else ""
         await msg.edit_text(f"Failed to start{detail}. Check /config and try again.")
         return
@@ -668,7 +664,6 @@ async def cmd_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "config": dict(config),
             "timer_task": None,
             "app": app,
-            "loop": loop,
         }
 
     rate_warn = ""
@@ -760,31 +755,30 @@ async def _recurring_restart(chat_id: int, user_id: int, old_slot: int,
         return
 
     slot = _alloc_slot(user_id)
-    loop = asyncio.get_event_loop()
 
     def _make_on_stop(cid, uid, s):
         def on_stop(reason):
-            asyncio.run_coroutine_threadsafe(
-                _notify_stop(cid, uid, s, reason, app), loop)
+            asyncio.ensure_future(
+                _notify_stop(cid, uid, s, reason, app))
         return on_stop
 
     def _make_on_milestone(cid):
         def on_milestone(data):
-            asyncio.run_coroutine_threadsafe(
-                _notify_milestone(cid, data, app), loop)
+            asyncio.ensure_future(
+                _notify_milestone(cid, data, app))
         return on_milestone
 
     def _make_on_error(cid):
         def on_error(msg):
-            asyncio.run_coroutine_threadsafe(
-                _notify_error(cid, msg, app), loop)
+            asyncio.ensure_future(
+                _notify_error(cid, msg, app))
         return on_error
 
     engine.on_stop = _make_on_stop(chat_id, user_id, slot)
     engine.on_milestone = _make_on_milestone(chat_id)
     engine.on_error = _make_on_error(chat_id)
 
-    if not engine.start():
+    if not await engine.start():
         await app.bot.send_message(
             chat_id, f"Recurring restart failed: {engine.last_error}")
         user_rec.pop(old_slot, None)
@@ -1743,7 +1737,6 @@ async def load_resume_state(application):
     finally:
         os.remove(RESUME_FILE)  # consume it — don't re-resume on crash
 
-    loop = asyncio.get_event_loop()
     resumed = 0
 
     for snap in snapshots:
@@ -1763,20 +1756,20 @@ async def load_resume_state(application):
 
             def _make_on_stop(cid, uid, s):
                 def on_stop(reason):
-                    asyncio.run_coroutine_threadsafe(
-                        _notify_stop(cid, uid, s, reason, application), loop)
+                    asyncio.ensure_future(
+                        _notify_stop(cid, uid, s, reason, application))
                 return on_stop
 
             def _make_on_milestone(cid):
                 def on_milestone(data):
-                    asyncio.run_coroutine_threadsafe(
-                        _notify_milestone(cid, data, application), loop)
+                    asyncio.ensure_future(
+                        _notify_milestone(cid, data, application))
                 return on_milestone
 
             def _make_on_error(cid):
                 def on_error(msg):
-                    asyncio.run_coroutine_threadsafe(
-                        _notify_error(cid, msg, application), loop)
+                    asyncio.ensure_future(
+                        _notify_error(cid, msg, application))
                 return on_error
 
             engine.on_stop = _make_on_stop(chat_id, user_id, slot)
@@ -1786,7 +1779,7 @@ async def load_resume_state(application):
             # Retry connection up to 3 times (API may not be ready immediately)
             started = False
             for attempt in range(3):
-                if engine.start_resumed():
+                if await engine.start_resumed():
                     started = True
                     break
                 logger.warning("Resume attempt %d/3 failed for user %d slot %d: %s",

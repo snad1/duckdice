@@ -1,15 +1,15 @@
-"""BettingEngine — per-user betting instance running in its own thread."""
+"""BettingEngine — per-user betting instance running as async task."""
 
+import asyncio
 import json
 import time
 import sqlite3
-import threading
-import requests
+import httpx
 from datetime import datetime
 from collections import deque
 from typing import Optional, List
 
-from .config import API_BASE, logger
+from .config import API_BASE, APP_ENV, logger
 from core.database import init_db, migrate_db, db_connect, cleanup_old_bets
 from core.strategy import StrategyRule, load_rules_from_text
 from core.engine import compute_next_bet, wolfrider_switch, apply_action, evaluate_rules
@@ -17,7 +17,7 @@ from core.engine import compute_next_bet, wolfrider_switch, apply_action, evalua
 # ── Batching / periodic save constants ──────────────────
 BET_BATCH_SIZE     = 50      # flush bets + session stats to DB every N bets
 SESSION_SAVE_SECS  = 30      # fallback: save session stats every N seconds
-REQUEST_TIMEOUT    = (5, 15) # (connect, read) in seconds
+REQUEST_TIMEOUT    = httpx.Timeout(15.0, connect=5.0)
 MAX_TIMEOUT_STREAK = 3       # recreate HTTP session after this many consecutive timeouts
 
 
@@ -27,7 +27,6 @@ class BettingEngine:
     def __init__(self, user_id: int, db_path: str, api_key: str, config: dict):
         self.user_id = user_id
         self.db_path = db_path
-        self.lock    = threading.Lock()
 
         # ── config (use `or` to handle None from presets) ──
         self.api_key        = api_key
@@ -133,37 +132,40 @@ class BettingEngine:
         self._last_session_save = 0.0          # last time session was saved
         self._db_connection: Optional[sqlite3.Connection] = None  # persistent connection
 
-        # ── persistent HTTP session (reuses TCP/TLS connections) ──
-        self._http = requests.Session()
-        self._http.headers.update(self._headers())
+        # ── async HTTP client (reuses TCP/TLS connections) ──
+        self._http: Optional[httpx.AsyncClient] = None
 
-        # ── thread ──
-        self._thread: Optional[threading.Thread] = None
+        # ── async task ──
+        self._task: Optional[asyncio.Task] = None
 
     # ── API ──────────────────────────────────────────────
     def _api_url(self, endpoint: str) -> str:
         """Build full API URL with api_key query parameter."""
         return f"{API_BASE}{endpoint}?api_key={self.api_key}"
 
-    def _recreate_http(self):
-        """Close and recreate the HTTP session to recover from stale connections."""
+    async def _recreate_http(self):
+        """Close and recreate the HTTP client to recover from stale connections."""
         try:
             if self._http:
-                self._http.close()
+                await self._http.aclose()
         except Exception:
             pass
-        self._http = requests.Session()
-        self._http.headers.update(self._headers())
-        logger.info("User %d: HTTP session recreated", self.user_id)
+        self._http = httpx.AsyncClient(
+            headers=self._headers(), timeout=REQUEST_TIMEOUT,
+            http2=False, follow_redirects=False,
+        )
+        logger.info("User %d: HTTP client recreated", self.user_id)
 
     def _headers(self) -> dict:
         return {
             "Content-Type": "application/json",
         }
 
-    def api_get_balances(self) -> list:
+    async def api_get_balances(self) -> list:
+        if not self._http:
+            await self._recreate_http()
         symbol = self.currency.upper()
-        r = self._http.get(self._api_url(f"/bot/stats/{symbol}"), timeout=REQUEST_TIMEOUT)
+        r = await self._http.get(self._api_url(f"/bot/stats/{symbol}"))
         r.raise_for_status()
         data = r.json()
         balances_data = data.get("balances", {})
@@ -171,7 +173,18 @@ class BettingEngine:
         faucet_bal = float(balances_data.get("faucet", 0))
         return [{"currency": symbol.lower(), "amount": main_bal, "faucet_amount": faucet_bal}]
 
-    def _api_place_bet(self, amount: float) -> Optional[dict]:
+    def _set_error(self, friendly: str, technical: str = ""):
+        """Set last_error: friendly message in production, technical details in dev."""
+        if APP_ENV != "production" and technical:
+            self.last_error = technical
+        else:
+            self.last_error = friendly
+        if technical:
+            logger.warning("User %d: %s", self.user_id, technical)
+
+    async def _api_place_bet(self, amount: float) -> Optional[dict]:
+        if not self._http:
+            await self._recreate_http()
         payload = {
             "symbol": self.currency.upper(),
             "chance": str(self.bet_value),
@@ -181,23 +194,21 @@ class BettingEngine:
         }
         try:
             t0 = time.time()
-            r = self._http.post(self._api_url("/dice/play"),
-                                json=payload, timeout=REQUEST_TIMEOUT)
+            r = await self._http.post(self._api_url("/dice/play"), json=payload)
             self._last_api_ms = (time.time() - t0) * 1000
-            self._consecutive_timeouts = 0  # success — reset
+            self._consecutive_timeouts = 0
             if r.status_code == 200:
                 data = r.json()
                 if "error" in data:
                     err_msg = data["error"] if isinstance(data["error"], str) else data["error"].get("message", "")
                     if "insufficient balance" in err_msg.lower():
-                        self.last_error = "Insufficient balance"
+                        self._set_error("Insufficient balance")
                         self._insufficient_balance = True
                         return None
-                    self.last_error = f"API error: {str(err_msg)[:120]}"
+                    self._set_error("Bet rejected by API", f"API error: {str(err_msg)[:120]}")
                     return None
                 self._api_ms_total += self._last_api_ms
                 self._api_ms_count += 1
-                # Map DuckDice response to internal format
                 bet = data.get("bet", {})
                 user = data.get("user", {})
                 is_win = bet.get("result", False)
@@ -226,34 +237,34 @@ class BettingEngine:
                         min_bet = float(min_amount)
                         self.base_bet = min_bet
                         self.current_bet = min_bet
-                        self.last_error = f"Min bet adjusted to {min_bet}"
+                        self._set_error(f"Min bet adjusted to {min_bet}")
                         return None
                 except (ValueError, KeyError):
                     pass
-                self.last_error = f"Validation error: {r.text[:120]}"
+                self._set_error("Validation error", f"Validation error: {r.text[:120]}")
                 self.running = False
                 self.stop_reason = f"API validation error: {r.text[:120]}"
             elif r.status_code == 429:
                 self.rate_wait = True
                 self.rate_backoff = 2.0
-                self.last_error = "Rate limit 429"
+                self._set_error("Rate limit reached — cooling down")
             else:
-                self.last_error = f"HTTP {r.status_code}: {r.text[:120]}"
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                self._set_error("Bet request failed", f"HTTP {r.status_code}: {r.text[:120]}")
+        except (httpx.TimeoutException, httpx.ConnectError):
             self._consecutive_timeouts += 1
-            self.last_error = f"Request timeout (#{self._consecutive_timeouts})"
+            self._set_error("Connection timeout — retrying")
             if self._consecutive_timeouts >= MAX_TIMEOUT_STREAK:
-                logger.warning("User %d: %d consecutive timeouts — recreating HTTP session",
+                logger.warning("User %d: %d consecutive timeouts — recreating HTTP client",
                                self.user_id, self._consecutive_timeouts)
-                self._recreate_http()
+                await self._recreate_http()
                 self._consecutive_timeouts = 0
         except Exception as e:
             err_str = str(e).lower()
             if "insufficient" in err_str or "balance" in err_str:
-                self.last_error = "Insufficient balance"
+                self._set_error("Insufficient balance")
                 self._insufficient_balance = True
             else:
-                self.last_error = str(e)[:120]
+                self._set_error("Unexpected error", str(e)[:120])
         return None
 
     # ── DB ───────────────────────────────────────────────
@@ -407,6 +418,37 @@ class BettingEngine:
         except Exception as e:
             logger.error("User %d: DB save_session failed: %s", self.user_id, e)
 
+    def _update_speed_stats(self):
+        """Update BPS/BPM tracking — called after each bet result."""
+        now = time.time()
+        elapsed = now - self.session_start
+        if elapsed > 0:
+            self.bets_per_second = self.total_bets / elapsed
+            self.bets_per_minute = self.bets_per_second * 60
+
+        sec_key = int(now)
+        min_key = int(now) // 60
+        if sec_key != self._current_sec:
+            if self._current_sec > 0 and self._bets_this_sec > 0:
+                if self._bets_this_sec > self.peak_bps:
+                    self.peak_bps = self._bets_this_sec
+                if self._bets_this_sec < self.low_bps:
+                    self.low_bps = self._bets_this_sec
+            self._current_sec = sec_key
+            self._bets_this_sec = 1
+        else:
+            self._bets_this_sec += 1
+        if min_key != self._current_min:
+            if self._current_min > 0 and self._bets_this_min > 0:
+                if self._bets_this_min > self.peak_bpm:
+                    self.peak_bpm = self._bets_this_min
+                if self._bets_this_min < self.low_bpm:
+                    self.low_bpm = self._bets_this_min
+            self._current_min = min_key
+            self._bets_this_min = 1
+        else:
+            self._bets_this_min += 1
+
     def _periodic_save(self):
         """Flush bets and save session stats periodically."""
         now = time.time()
@@ -482,12 +524,14 @@ class BettingEngine:
         return ""
 
     # ── LIFECYCLE ────────────────────────────────────────
-    def start(self) -> bool:
-        """Connect, fetch balance, start betting thread. Returns True on success."""
+    async def start(self) -> bool:
+        """Connect, fetch balance, start betting task. Returns True on success."""
+        if not self._http:
+            await self._recreate_http()
         try:
-            balances = self.api_get_balances()
+            balances = await self.api_get_balances()
         except Exception as e:
-            self.last_error = f"Connection failed: {e}"
+            self._set_error("Connection failed", f"Connection failed: {e}")
             return False
 
         bal = 0.0
@@ -496,7 +540,7 @@ class BettingEngine:
                 bal = float(b.get("amount", 0))
                 break
         if bal <= 0 and self.base_bet > 0:
-            self.last_error = f"No {self.currency.upper()} balance found"
+            self._set_error(f"No {self.currency.upper()} balance found")
             return False
 
         init_db(self.db_path)
@@ -512,8 +556,7 @@ class BettingEngine:
         self.running         = True
         self.status          = "Starting..."
 
-        self._thread = threading.Thread(target=self._betting_loop, daemon=True)
-        self._thread.start()
+        self._task = asyncio.create_task(self._betting_loop())
         return True
 
     def snapshot_state(self) -> dict:
@@ -601,37 +644,32 @@ class BettingEngine:
         self.next_profit_milestone  = snap.get("next_profit_milestone", 0.0)
         self._last_profit_milestone = snap.get("_last_profit_milestone", 0.0)
 
-    def start_resumed(self) -> bool:
+    async def start_resumed(self) -> bool:
         """Resume a saved session. Tests API connection but skips balance fetch / new DB session."""
-        self._http = requests.Session()
-        self._http.headers.update(self._headers())
+        if not self._http:
+            await self._recreate_http()
         init_db(self.db_path)
 
-        # Verify API is reachable before resuming the betting loop
         try:
-            self.api_get_balances()
+            await self.api_get_balances()
         except Exception as e:
-            self.last_error = f"Resume connection failed: {e}"
+            self._set_error("Resume connection failed", f"Resume connection failed: {e}")
             return False
 
         self.running = True
         self.paused = False
         self.status = "Resumed"
         self._last_session_save = time.time()
-        # Recalculate speed from restored totals so status isn't 0 after resume
         elapsed = time.time() - self.session_start if self.session_start else 0
         if elapsed > 0 and self.total_bets > 0:
             self.bets_per_second = self.total_bets / elapsed
             self.bets_per_minute = self.bets_per_second * 60
-        self._thread = threading.Thread(target=self._betting_loop, daemon=True)
-        self._thread.start()
+        self._task = asyncio.create_task(self._betting_loop())
         logger.info("User %d: Resumed session #%d", self.user_id, self.session_id)
         return True
 
     def stop(self):
         self.running = False
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=10)
 
     def pause(self):
         self.paused = True
@@ -712,31 +750,26 @@ class BettingEngine:
         }
 
     # ── BETTING LOOP ─────────────────────────────────────
-    def _betting_loop(self):
+    async def _betting_loop(self):
         last_result = "none"
         logger.info("User %d: Session #%d started", self.user_id, self.session_id)
 
         while self.running:
             if self.paused:
                 self.status = "PAUSED"
-                time.sleep(0.5)
+                await asyncio.sleep(0.3)
                 continue
 
-            # rate limit probe
+            # rate limit recovery — wait then resume betting
             if self.rate_wait:
                 backoff = self.rate_backoff
-                self.status = f"Rate limit — probing in {backoff:.0f}s..."
-                time.sleep(backoff)
-                try:
-                    symbol = self.currency.upper()
-                    r = self._http.get(self._api_url(f"/bot/stats/{symbol}"), timeout=REQUEST_TIMEOUT)
-                    if r.status_code == 200:
-                        self.rate_wait = False
-                        self.rate_backoff = 2.0
-                    else:
-                        self.rate_backoff = min(backoff * 2, 32.0)
-                except Exception:
-                    self.rate_backoff = min(backoff * 2, 32.0)
+                self.status = f"Rate limit — resuming in {backoff:.0f}s..."
+                for _ in range(int(backoff * 4)):
+                    if not self.running:
+                        break
+                    await asyncio.sleep(0.25)
+                self.rate_wait = False
+                self.rate_backoff = 2.0
                 continue
 
             # stop conditions
@@ -751,11 +784,11 @@ class BettingEngine:
 
             # bet pacing
             if self.bet_delay > 0:
-                time.sleep(self.bet_delay)
+                await asyncio.sleep(self.bet_delay)
 
             # place bet
             self.status = f"Placing bet #{self.total_bets + 1}..."
-            result = self._api_place_bet(self.current_bet)
+            result = await self._api_place_bet(self.current_bet)
 
             if result is None:
                 if self._insufficient_balance:
@@ -772,7 +805,7 @@ class BettingEngine:
                     break
                 self.consecutive_errors += 1
                 self.backoff_delay = min(self.backoff_delay * 2, 30.0)
-                time.sleep(self.backoff_delay)
+                await asyncio.sleep(self.backoff_delay)
                 continue
 
             bet_data     = result.get("bet", {})
@@ -783,67 +816,43 @@ class BettingEngine:
             new_balance  = float(balance_data.get("amount", self.current_balance))
             raw_profit   = float(bet_data.get("profit", 0))
 
-            with self.lock:
-                self.consecutive_errors = 0
-                self.backoff_delay = 1.0
-                self.total_bets += 1
-                self.wagered    += amount_used
-                self.profit     += raw_profit
-                self.current_balance = new_balance
+            self.consecutive_errors = 0
+            self.backoff_delay = 1.0
+            self.total_bets += 1
+            self.wagered    += amount_used
+            self.profit     += raw_profit
+            self.current_balance = new_balance
 
-                if bet_state == "win":
-                    self.wins += 1
-                    if raw_profit > self.highest_win: self.highest_win = raw_profit
-                    self.current_streak = max(self.current_streak, 0) + 1
-                    self.max_win_streak = max(self.max_win_streak, self.current_streak)
-                else:
-                    self.losses += 1
-                    if amount_used > self.biggest_loss: self.biggest_loss = amount_used
-                    self.current_streak = min(self.current_streak, 0) - 1
-                    self.max_loss_streak = max(self.max_loss_streak, abs(self.current_streak))
+            if bet_state == "win":
+                self.wins += 1
+                if raw_profit > self.highest_win: self.highest_win = raw_profit
+                self.current_streak = max(self.current_streak, 0) + 1
+                self.max_win_streak = max(self.max_win_streak, self.current_streak)
+            else:
+                self.losses += 1
+                if amount_used > self.biggest_loss: self.biggest_loss = amount_used
+                self.current_streak = min(self.current_streak, 0) - 1
+                self.max_loss_streak = max(self.max_loss_streak, abs(self.current_streak))
 
-                if amount_used > self.highest_bet: self.highest_bet = amount_used
-                if new_balance > self.highest_balance: self.highest_balance = new_balance
-                if new_balance < self.lowest_balance: self.lowest_balance = new_balance
+            if amount_used > self.highest_bet: self.highest_bet = amount_used
+            if new_balance > self.highest_balance: self.highest_balance = new_balance
+            if new_balance < self.lowest_balance: self.lowest_balance = new_balance
 
-                if self.total_bets % 5 == 0:
-                    self.profit_history.append(self.profit)
+            if self.total_bets % 5 == 0:
+                self.profit_history.append(self.profit)
 
-                self.recent_bets.append({
-                    "n": self.total_bets, "time": datetime.now().isoformat(),
-                    "amt": amount_used, "roll": result_value,
-                    "state": bet_state, "pnl": raw_profit, "bal": new_balance,
-                })
+            self.recent_bets.append({
+                "n": self.total_bets, "time": datetime.now().isoformat(),
+                "amt": amount_used, "roll": result_value,
+                "state": bet_state, "pnl": raw_profit, "bal": new_balance,
+            })
 
-                now = time.time()
-                elapsed = now - self.session_start
-                if elapsed > 0:
-                    self.bets_per_second = self.total_bets / elapsed
-                    self.bets_per_minute = self.bets_per_second * 60
+            self._update_speed_stats()
 
-                sec_key = int(now)
-                min_key = int(now) // 60
-                if sec_key != self._current_sec:
-                    if self._current_sec > 0 and self._bets_this_sec > 0:
-                        if self._bets_this_sec > self.peak_bps: self.peak_bps = self._bets_this_sec
-                        if self._bets_this_sec < self.low_bps: self.low_bps = self._bets_this_sec
-                    self._current_sec = sec_key
-                    self._bets_this_sec = 1
-                else:
-                    self._bets_this_sec += 1
-                if min_key != self._current_min:
-                    if self._current_min > 0 and self._bets_this_min > 0:
-                        if self._bets_this_min > self.peak_bpm: self.peak_bpm = self._bets_this_min
-                        if self._bets_this_min < self.low_bpm: self.low_bpm = self._bets_this_min
-                    self._current_min = min_key
-                    self._bets_this_min = 1
-                else:
-                    self._bets_this_min += 1
-
-                sign  = "+" if raw_profit >= 0 else ""
-                emoji = "W" if bet_state == "win" else "L"
-                self.status = f"{emoji} {'WIN' if bet_state=='win' else 'LOSS'} | Roll: {result_value:.2f} | P/L: {sign}{raw_profit:.8f}"
-                self.last_error = ""
+            sign  = "+" if raw_profit >= 0 else ""
+            emoji = "W" if bet_state == "win" else "L"
+            self.status = f"{emoji} {'WIN' if bet_state=='win' else 'LOSS'} | Roll: {result_value:.2f} | P/L: {sign}{raw_profit:.8f}"
+            self.last_error = ""
 
             # queue bet for batched DB write
             self._queue_bet(bet_data, raw_profit, new_balance)
@@ -880,13 +889,25 @@ class BettingEngine:
                     except Exception as e:
                         logger.error("User %d: Milestone callback failed: %s", self.user_id, e)
 
-        # session ended — flush remaining bets and save final state
+            # periodic progress log (every 500 bets)
+            if self.total_bets % 500 == 0:
+                logger.info("User %d: #%d bets=%-6d bps=%.1f P/L=%+.8f bal=%.8f",
+                            self.user_id, self.session_id,
+                            self.total_bets, self.bets_per_second, self.profit, self.current_balance)
+
+        # session ended — cleanup
         self._flush_bets()
         if self.session_id:
             self._db_save_session(final=True)
         self._close_conn()
-        self._http.close()
-        logger.info("User %d: Session #%d ended — %s", self.user_id, self.session_id, self.stop_reason or "stopped")
+        if self._http:
+            try:
+                await self._http.aclose()
+            except Exception:
+                pass
+        logger.info("User %d: Session #%d ended — %s (bets=%d, P/L=%+.8f)",
+                    self.user_id, self.session_id, self.stop_reason or "stopped",
+                    self.total_bets, self.profit)
         if self.on_stop:
             try:
                 self.on_stop(self.stop_reason or "Stopped by user")
