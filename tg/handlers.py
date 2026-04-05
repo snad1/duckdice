@@ -696,16 +696,19 @@ async def cmd_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     slot_info = f" (slot {slot})" if len(_get_running(user_id)) > 1 else ""
     faucet_info = " (faucet)" if engine.faucet else ""
     rec_info = f"\nRecurring: `{int(config.get('recurring_delay') or 60)}s`" if config.get("recurring") else ""
-    await msg.edit_text(
-        f"Session #{engine.session_id}{slot_info} started!{faucet_info}\n\n"
-        f"Strategy: `{engine.strategy}`\n"
-        f"Multiplier: `{engine.multiplier:.2f}x` ({wc}%) {rule_display}\n"
-        f"Base bet: `{engine.base_bet:.8f} {engine.currency.upper()}`\n"
-        f"Balance: `{engine.current_balance:.8f} {engine.currency.upper()}`"
-        f"{rec_info}\n\n"
-        f"Use /status to check progress.{rate_warn}",
-        parse_mode="Markdown",
-    )
+    try:
+        await msg.edit_text(
+            f"Session #{engine.session_id}{slot_info} started!{faucet_info}\n\n"
+            f"Strategy: `{engine.strategy}`\n"
+            f"Multiplier: `{engine.multiplier:.2f}x` ({wc}%) {rule_display}\n"
+            f"Base bet: `{engine.base_bet:.8f} {engine.currency.upper()}`\n"
+            f"Balance: `{engine.current_balance:.8f} {engine.currency.upper()}`"
+            f"{rec_info}\n\n"
+            f"Use /status to check progress.{rate_warn}",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        logger.warning("User %d: Session started but Telegram confirmation timed out", user_id)
 
 
 async def _notify_stop(chat_id: int, user_id: int, slot: int, reason: str, app):
@@ -818,17 +821,20 @@ async def _recurring_restart(chat_id: int, user_id: int, old_slot: int,
     wc = round(99.0 / engine.multiplier, 2)
     rule_display = "High" if engine.rule == "over" else "Low"
     faucet_info = " (faucet)" if engine.faucet else ""
-    await app.bot.send_message(
-        chat_id,
-        f"Recurring session #{engine.session_id} started!{faucet_info}\n\n"
-        f"Strategy: `{engine.strategy}`\n"
-        f"Multiplier: `{engine.multiplier:.2f}x` ({wc}%) {rule_display}\n"
-        f"Base bet: `{engine.base_bet:.8f} {engine.currency.upper()}`\n"
-        f"Balance: `{engine.current_balance:.8f} {engine.currency.upper()}`\n"
-        f"Recurring: `{rec_data['delay'] if rec_data else delay}s`\n\n"
-        f"Use /status to check progress.",
-        parse_mode="Markdown",
-    )
+    try:
+        await app.bot.send_message(
+            chat_id,
+            f"Recurring session #{engine.session_id} started!{faucet_info}\n\n"
+            f"Strategy: `{engine.strategy}`\n"
+            f"Multiplier: `{engine.multiplier:.2f}x` ({wc}%) {rule_display}\n"
+            f"Base bet: `{engine.base_bet:.8f} {engine.currency.upper()}`\n"
+            f"Balance: `{engine.current_balance:.8f} {engine.currency.upper()}`\n"
+            f"Recurring: `{rec_data['delay'] if rec_data else delay}s`\n\n"
+            f"Use /status to check progress.",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        logger.warning("User %d: Session started but Telegram confirmation timed out", user_id)
 
 
 def _cancel_recurring_for_slot(user_id: int, slot: int):
