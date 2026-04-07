@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.2 — Bug Fixes (2026-04-07)
+
+### Fixed
+
+- **Live bet cleanup** — ISO timestamp `T` separator caused comparison failure with SQLite's `datetime()`. Bets older than purge_days now correctly deleted during running sessions
+- **Telegram timeout on session start** — Session start confirmation wrapped in try/except. Session continues even if Telegram times out
+- **Milestone bets=0** — Setting `milestonebets` to 0 now properly disables (was defaulting to 100)
+- **Help text** — Added missing cleanup, delsession, purgedays commands
+
+---
+
 ## v1.1.1 — Safety, Cleanup, Charts (2026-04-03)
 
 ### Added
