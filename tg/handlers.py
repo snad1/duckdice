@@ -767,6 +767,19 @@ async def cmd_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("User %d: Session started but Telegram confirmation timed out", user_id)
 
 
+async def _safe_send(app, chat_id, text, **kwargs):
+    """Engine-driven send that swallows flood/network errors to avoid unraised Task exceptions."""
+    from telegram.error import RetryAfter, NetworkError, TimedOut, BadRequest
+    try:
+        await _safe_send(app, chat_id, text, **kwargs)
+    except RetryAfter as e:
+        logger.warning("Telegram flood — dropping notification (retry in %ss)", e.retry_after)
+    except (NetworkError, TimedOut) as e:
+        logger.warning("Telegram network — dropping notification: %s", e)
+    except BadRequest as e:
+        logger.warning("Telegram rejected notification: %s", e)
+
+
 async def _notify_stop(chat_id: int, user_id: int, slot: int, reason: str, app):
     user_engines = active_engines.get(user_id, {})
     engine = user_engines.pop(slot, None)
@@ -777,7 +790,7 @@ async def _notify_stop(chat_id: int, user_id: int, slot: int, reason: str, app):
         return
     s = engine.get_status()
     text = format_stop(s, reason)
-    await app.bot.send_message(chat_id, text, parse_mode="Markdown")
+    await _safe_send(app, chat_id, text, parse_mode="Markdown")
 
     # Recurring bet: schedule restart if condition stop (not manual)
     user_rec = recurring_state.get(user_id, {})
@@ -787,7 +800,7 @@ async def _notify_stop(chat_id: int, user_id: int, slot: int, reason: str, app):
         config = rec["config"]
         # Carry forward the current base_bet (profit increment may have raised it)
         config["base_bet"] = engine.base_bet
-        await app.bot.send_message(
+        await _safe_send(app, 
             chat_id,
             f"Recurring: restarting in {delay}s...\n"
             f"Use `/stop recurring` to cancel.",
@@ -800,11 +813,11 @@ async def _notify_stop(chat_id: int, user_id: int, slot: int, reason: str, app):
 
 async def _notify_milestone(chat_id: int, data: dict, app):
     text = format_milestone(data)
-    await app.bot.send_message(chat_id, text, parse_mode="Markdown")
+    await _safe_send(app, chat_id, text, parse_mode="Markdown")
 
 
 async def _notify_error(chat_id: int, message: str, app):
-    await app.bot.send_message(chat_id, f"⚠️ {message}", parse_mode="Markdown")
+    await _safe_send(app, chat_id, f"⚠️ {message}", parse_mode="Markdown")
 
 
 async def _recurring_restart(chat_id: int, user_id: int, old_slot: int,
@@ -817,7 +830,7 @@ async def _recurring_restart(chat_id: int, user_id: int, old_slot: int,
 
     running = _get_running(user_id)
     if len(running) >= MAX_SESSIONS:
-        await app.bot.send_message(
+        await _safe_send(app, 
             chat_id, "Recurring restart skipped — max sessions reached.")
         user_rec.pop(old_slot, None)
         return
@@ -832,7 +845,7 @@ async def _recurring_restart(chat_id: int, user_id: int, old_slot: int,
         engine = BettingEngine(user_id, db_path, config["api_key"], config)
     except Exception as e:
         logger.error("Recurring restart config error: %s", e, exc_info=True)
-        await app.bot.send_message(chat_id, f"Recurring restart failed: config error.")
+        await _safe_send(app, chat_id, f"Recurring restart failed: config error.")
         user_rec.pop(old_slot, None)
         return
 
@@ -861,7 +874,7 @@ async def _recurring_restart(chat_id: int, user_id: int, old_slot: int,
     engine.on_error = _make_on_error(chat_id)
 
     if not await engine.start():
-        await app.bot.send_message(
+        await _safe_send(app, 
             chat_id, f"Recurring restart failed: {engine.last_error}")
         user_rec.pop(old_slot, None)
         return
@@ -880,7 +893,7 @@ async def _recurring_restart(chat_id: int, user_id: int, old_slot: int,
     rule_display = "High" if engine.rule == "over" else "Low"
     faucet_info = " (faucet)" if engine.faucet else ""
     try:
-        await app.bot.send_message(
+        await _safe_send(app, 
             chat_id,
             f"Recurring session #{engine.session_id} started!{faucet_info}\n\n"
             f"Strategy: `{engine.strategy}`\n"
