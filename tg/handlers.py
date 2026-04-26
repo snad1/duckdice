@@ -171,6 +171,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`recurringdelay` \u2014 Seconds before restart (default 60)\n"
         "`streakdelay_loss` \u2014 Delay after N losses (`5:1.0` = every 5 losses \u2192 1s)\n"
         "`streakdelay_win` \u2014 Delay after N wins (`10:0.5` = every 10 wins \u2192 0.5s)\n"
+        "`streakdelay_bets` \u2014 Delay after every N bets (`100:0.5` = every 100 bets \u2192 0.5s)\n"
         "`streakbet_loss` \u2014 Scale bet after N losses (`10:0.5` = every 10 losses \u2192 halve)\n"
         "`basebet_pct` \u2014 Base bet as fraction of balance (`0.001` = 0.1%, `off` to disable)\n"
         "`purgedays` \u2014 Auto-delete bets older than N days (1-30, default 1)\n\n"
@@ -370,12 +371,15 @@ async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         sdl = config.get("streak_delay_loss")
         sdw = config.get("streak_delay_win")
+        sdb = config.get("streak_delay_bets")
         sbl = config.get("streakbet_loss")
         bbp = config.get("basebet_pct")
         if sdl:
             lines.append(f"Streak delay loss: `{sdl}`")
         if sdw:
             lines.append(f"Streak delay win: `{sdw}`")
+        if sdb:
+            lines.append(f"Streak delay bets: `{sdb}`")
         if sbl:
             lines.append(f"Streak bet loss: `{sbl}`")
         if bbp:
@@ -622,6 +626,14 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             else:
                 config["streak_delay_win"] = value
+        elif param in ("streakdelay_bets", "sdbets"):
+            if value.lower() == "off":
+                config["streak_delay_bets"] = None
+            elif ":" not in value:
+                await update.message.reply_text("Format: `/set streakdelay_bets 100:0.5` (every 100 bets → 0.5s delay)\nUse `off` to disable.", parse_mode="Markdown")
+                return
+            else:
+                config["streak_delay_bets"] = value
         elif param in ("streakbet_loss", "sbloss"):
             if value.lower() == "off":
                 config["streakbet_loss"] = None
@@ -1077,7 +1089,8 @@ async def cmd_tweak(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "`/tweak basebet 0.00000002`\n"
             "`/tweak multiplier 2.5`\n"
             "`/tweak lossmult 2.01`\n"
-            "`/tweak winmult 1.5`\n\n"
+            "`/tweak winmult 1.5`\n"
+            "`/tweak sdbets 100:0.5` — delay every 100 bets\n\n"
             "Use `off` to disable: `/tweak maxwins off`\n"
             "Add slot: `/tweak maxwins 5000 2`",
             parse_mode="Markdown")
@@ -1103,6 +1116,8 @@ async def cmd_tweak(update: Update, context: ContextTypes.DEFAULT_TYPE):
             changes["streak_delay_loss"] = None if off else value
         elif param in ("sdwin", "streakdelay_win"):
             changes["streak_delay_win"] = None if off else value
+        elif param in ("sdbets", "streakdelay_bets"):
+            changes["streak_delay_bets"] = None if off else value
         elif param in ("sbloss", "streakbet_loss"):
             changes["streakbet_loss"] = None if off else value
         elif param in ("bbpct", "basebet_pct"):
