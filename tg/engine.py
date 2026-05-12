@@ -42,6 +42,7 @@ class BettingEngine:
         self.win_mult       = float(config.get("win_mult") or 1.0)
         self.loss_mult      = float(config.get("loss_mult") or 2.0)
         self.bet_delay      = float(config.get("bet_delay") or 0)
+        self._last_bet_start_time: float = 0.0  # monotonic ts for bet_delay pacing
         # ── streak delay: pause after N consecutive wins/losses ──
         self.streak_delay_loss = self._parse_streak_delay(config.get("streak_delay_loss"))
         self.streak_delay_win  = self._parse_streak_delay(config.get("streak_delay_win"))
@@ -975,9 +976,12 @@ class BettingEngine:
                 self._db_save_session(final=True)
                 break
 
-            # bet pacing
+            # bet pacing — minimum interval since the previous bet started
             if self.bet_delay > 0:
-                await asyncio.sleep(self.bet_delay)
+                wait = (self._last_bet_start_time + self.bet_delay) - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            self._last_bet_start_time = time.monotonic()
 
             # place bet
             self.status = f"Placing bet #{self.total_bets + 1}..."
