@@ -1,5 +1,18 @@
 # Changelog
 
+## CLI v1.5.0 / TG v1.7.0 — WolfBet hardening subset ported (2026-07-19)
+
+Same portable subset as the cryptogames v1.5.0 port. No bet-loop behaviour change.
+
+- **SQLite PRAGMAs** on both CLI `_db_conn` and TG `_get_conn` (synchronous=NORMAL, busy_timeout=5000, cache_size=-32000, temp_store=MEMORY).
+- **`Restart=on-failure`** in `install.sh` for both units.
+- **Uptime pause bookkeeping** — `session_bet_ended_at` + `session_pause_started_at`; `pause()` freezes, `resume()` clears; `get_status()` uptime uses frozen bet-end; `_db_save_session(final=True)` writes frozen `ended_at`. New `uptime_sec` + `pause_remaining_sec` in status dict.
+- **Monitor Row 6** — placeholder `" P/L —"` replaced by `_build_config_progress_row(d)` (`Ms` / `MaxP` / `MaxL` / `MaxB` / `MaxW` / `MinBal` / `Rec`), green <80% / yellow ≥80% / bold_red ≥95%, fallback `CFG — no goals set`.
+- **TG `/diagnose`** + **TG `/analytics`** + `/help` entries.
+- **First tests**: `tests/test_portability_v1.py` — 21 tests.
+
+`VERSION` `1.4.0` → `1.5.0`. `tg/__init__.py` `1.6.10` → `1.7.0`. `duckctl` unchanged.
+
 ## v1.6.10 — `/status` speed block trimmed (2026-06-17)
 
 ### Changed

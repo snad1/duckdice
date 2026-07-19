@@ -1,4 +1,4 @@
-# DuckDice AutoBot v1.2.0 + Telegram Bot v1.2.0
+# DuckDice AutoBot v1.5.0 + Telegram Bot v1.7.0
 
 High-speed auto-betting engine for DuckDice.io Dice with a live dashboard, Telegram bot, and web admin panel. Runs on any server or local machine — leave it running and manage via CLI, Telegram, or browser.
 
