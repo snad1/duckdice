@@ -1,4 +1,4 @@
-# DuckDice AutoBot v1.5.0 + Telegram Bot v1.7.0
+# DuckDice AutoBot v1.6.0 + Telegram Bot v1.8.0
 
 High-speed auto-betting engine for DuckDice.io Dice with a live dashboard, Telegram bot, and web admin panel. Runs on any server or local machine — leave it running and manage via CLI, Telegram, or browser.
 
@@ -93,7 +93,7 @@ duckctl start             # Start CLI bot as daemon
 duckctl stop              # Stop CLI bot
 duckctl monitor           # Attach live TUI to running daemon
 duckctl status            # Check running session status
-duckctl stats             # Show all-time session statistics
+duckctl stats             # Session statistics (--since/--until DATE for a window)
 
 duckctl tg env            # Edit .env (set Telegram token)
 duckctl tg start          # Start Telegram bot
@@ -141,6 +141,8 @@ The Telegram bot provides full betting control from your phone. Each Telegram us
 | `/status [slot]` | Live status — summary when multiple sessions |
 | `/monitor [slot] [interval]` | Auto-updating status (3-60s) |
 | `/stats` | Session history |
+| `/diagnose [slot]` | Bottleneck analysis (top blocker + advice) |
+| `/analytics [SINCE] [UNTIL]` | Analytics (per-game, per-strategy, top-5), date-windowed (e.g. 2026-08-14) |
 | `/session <id>` | Full session report with config snapshot + streaks |
 | `/lastbets [N]` | Recent bets |
 | `/rules` | List current rules |
@@ -221,6 +223,8 @@ python3 duckdice.py --status          # Check running session status
 python3 duckdice.py --stop            # Stop a running daemon
 python3 duckdice.py --setup-only      # Wizard only, don't start
 python3 duckdice.py --stats           # Session history + totals
+python3 duckdice.py --stats --since 2026-08-01 --until 2026-08-15
+                                      # Date-windowed stats (bare date = inclusive)
 python3 duckdice.py --last-bets N     # Last N bets across sessions
 python3 duckdice.py --session-bets N  # Full stats + streaks for session N
 python3 duckdice.py --verbose         # Enable DEBUG logging

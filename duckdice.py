@@ -56,7 +56,7 @@ STATE_PATH   = os.environ.get("DUCKDICE_STATE_PATH",   os.path.expanduser("~/.du
 PID_PATH     = os.environ.get("DUCKDICE_PID_PATH",     os.path.expanduser("~/.duckdice_autobot.pid"))
 PRESET_PATH  = os.environ.get("DUCKDICE_PRESET_PATH",  os.path.expanduser("~/.duckdice_presets.json"))
 LOG_DIR      = os.environ.get("DUCKDICE_LOG_DIR",      os.path.expanduser("~/.duckdice_logs"))
-VERSION      = "1.5.0"
+VERSION      = "1.6.0"
 APP_ENV      = os.environ.get("APP_ENV", "production")
 
 # ── Daily rotating logger ──
@@ -2642,15 +2642,39 @@ def cmd_list_presets():
 # ══════════════════════════════════════════════════════════
 #  DATABASE QUERY COMMANDS
 # ══════════════════════════════════════════════════════════
-def cmd_stats():
-    """Show all-time session statistics."""
+def _stats_date_window(since: str = None, until: str = None):
+    """Build an optional date-window clause for the sessions table.
+
+    Bare dates (YYYY-MM-DD) or full ISO timestamps. A bare `until` is
+    extended to end-of-day so the day is inclusive. ISO strings compare
+    correctly lexically in SQLite. Returns (clause, params, label).
+    """
+    conds, params = [], []
+    if since:
+        conds.append("started_at >= ?")
+        params.append(since)
+    if until:
+        u = until if len(until) > 10 else until + "T23:59:59"
+        conds.append("started_at <= ?")
+        params.append(u)
+    if not conds:
+        return "", [], ""
+    clause = " WHERE " + " AND ".join(conds)
+    label = f"  [{since or '…'} → {until or '…'}]"
+    return clause, params, label
+
+
+def cmd_stats(since: str = None, until: str = None):
+    """Show session statistics, optionally filtered to a date window."""
     if not os.path.exists(DB_PATH):
         console.print("[yellow]No database found.[/]")
         return
     conn = _db_conn()
+    where, params, window_label = _stats_date_window(since, until)
+    limit = 50 if (since or until) else 20
 
     # session list — fetch all columns
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT id, started_at AS started, ended_at AS ended,
                UPPER(currency) AS cur, strategy, multiplier, base_bet,
                total_bets, wins, losses, profit, wagered,
@@ -2661,10 +2685,10 @@ def cmd_stats():
                COALESCE(bets_per_minute, 0), COALESCE(bets_per_second, 0),
                COALESCE(peak_bps, 0), COALESCE(low_bps, 0),
                COALESCE(peak_bpm, 0), COALESCE(low_bpm, 0)
-        FROM sessions ORDER BY id DESC LIMIT 20
-    """).fetchall()
+        FROM sessions{where} ORDER BY id DESC LIMIT ?
+    """, (*params, limit)).fetchall()
 
-    console.print(Rule("[bold cyan]Session History (last 20)[/]"))
+    console.print(Rule(f"[bold cyan]Session History (last {limit})[/]{window_label}"))
 
     # Print each session as a detailed block
     for r in rows:
@@ -2722,8 +2746,8 @@ def cmd_stats():
         console.print(f"    [dim]Streaks:[/] W+{mws}  L-{mls}  [dim]Best Win:[/] [green]+{hi_win:.8f}[/]  [dim]Worst Loss:[/] [red]-{big_loss:.8f}[/]")
         console.print()
 
-    # totals
-    totals = conn.execute("""
+    # totals — honor the same date window as the listing
+    totals = conn.execute(f"""
         SELECT COUNT(*), COALESCE(SUM(total_bets),0), COALESCE(SUM(wins),0),
                COALESCE(SUM(losses),0), COALESCE(SUM(profit),0), COALESCE(SUM(wagered),0),
                COALESCE(MAX(max_win_streak),0), COALESCE(MAX(max_loss_streak),0),
@@ -2733,8 +2757,8 @@ def cmd_stats():
                COALESCE(MAX(biggest_loss),0), COALESCE(AVG(bets_per_minute),0),
                COALESCE(MAX(peak_bps),0), COALESCE(MAX(peak_bpm),0),
                COALESCE(AVG(bets_per_second),0)
-        FROM sessions
-    """).fetchone()
+        FROM sessions{where}
+    """, tuple(params)).fetchone()
     conn.close()
 
     sessions, tot_bets, tot_wins, tot_losses, tot_profit, tot_wagered, \
@@ -2750,7 +2774,7 @@ def cmd_stats():
     avg_pc = "green" if avg_pnl >= 0 else "red"
     avg_ps = "+" if avg_pnl >= 0 else ""
 
-    console.print(Rule("[bold cyan]All-Time Totals[/]"))
+    console.print(Rule(f"[bold cyan]{'Range' if (since or until) else 'All-Time'} Totals[/]{window_label}"))
     console.print(f"  [dim]Sessions:[/]      {sessions}")
     console.print(f"  [dim]Total Bets:[/]    {tot_bets}  (W {tot_wins} / L {tot_losses}  WR {wr})")
     console.print(f"  [dim]Wagered:[/]       {tot_wagered:.8f}")
@@ -3035,6 +3059,10 @@ def main():
     group.add_argument("--stats",   action="store_true", help="Show all-time session statistics")
     group.add_argument("--last-bets", type=int, metavar="N", help="Show last N bets from database")
     group.add_argument("--session-bets", type=int, metavar="ID", help="Show bets for a specific session")
+    # modifiers, not commands: must combine WITH --stats, so they live on the
+    # standalone parser, NOT the mutually-exclusive command group.
+    parser.add_argument("--since", metavar="DATE", help="With --stats: window start (YYYY-MM-DD or ISO ts)")
+    parser.add_argument("--until", metavar="DATE", help="With --stats: window end (bare date = inclusive end of day)")
     parser.add_argument("--preset", type=str, metavar="NAME",
                         help="Load a named preset and start (skips wizard)")
     parser.add_argument("--verbose", action="store_true",
@@ -3061,7 +3089,7 @@ def main():
         cmd_list_presets()
         return
     if args.stats:
-        cmd_stats()
+        cmd_stats(since=args.since, until=args.until)
         return
     if args.last_bets:
         cmd_last_bets(args.last_bets)

@@ -1,5 +1,16 @@
 # Changelog
 
+## CLI v1.6.0 / TG v1.8.0 — Date-range stats + analytics (2026-08-15)
+
+Mirrors the wolfbet v2.30.9/v2.31.0 date-window wave. No bet-loop behaviour change.
+
+- **CLI `--stats --since/--until DATE`** — optional date window (bare `YYYY-MM-DD` or full ISO ts; bare `--until` is inclusive end-of-day) via new `_stats_date_window` helper. Both the session listing and the totals honor the window; filtered views raise the listing limit 20 → 50 and label headers `Range Totals`. `--since`/`--until` are modifiers on the standalone parser, not the mutually-exclusive command group.
+- **`duckctl stats`** now passes extra args through: `duckctl stats --since 2026-08-01 --until 2026-08-15`.
+- **TG `/analytics [SINCE] [UNTIL]`** — same window threaded through all five queries (lifetime, by game, by strategy, top-5 best/worst); header shows `Range analytics` + window label; usage hint on >2 args; `/help` updated.
+- **Tests**: `tests/test_portability_v1.py` — 21 → 32 tests (helper units, seeded-DB functional filtering, argparse/source checks, `duckctl` passthrough).
+
+`VERSION` `1.5.0` → `1.6.0`. `tg/__init__.py` `1.7.0` → `1.8.0`.
+
 ## CLI v1.5.0 / TG v1.7.0 — WolfBet hardening subset ported (2026-07-19)
 
 Same portable subset as the cryptogames v1.5.0 port. No bet-loop behaviour change.

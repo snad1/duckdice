@@ -49,11 +49,11 @@ def _mk_engine(db):
 
 # ── VERSION ───────────────────────────────────────────────
 def test_cli_version():
-    assert dd.VERSION == "1.5.0"
+    assert dd.VERSION == "1.6.0"
 
 
 def test_tg_version():
-    assert tg.VERSION == "1.7.0"
+    assert tg.VERSION == "1.8.0"
 
 
 # ── PRAGMAs ───────────────────────────────────────────────
@@ -237,3 +237,110 @@ def test_help_mentions_new_commands():
     src = inspect.getsource(tg_handlers.cmd_help)
     assert "/diagnose" in src
     assert "/analytics" in src
+
+
+# ── Date-window stats + analytics (v1.6.0 / TG v1.8.0) ───
+def test_date_window_empty_when_no_args():
+    clause, params, label = dd._stats_date_window()
+    assert clause == "" and params == [] and label == ""
+
+
+def test_date_window_since_only():
+    clause, params, label = dd._stats_date_window(since="2026-08-01")
+    assert "started_at >= ?" in clause
+    assert params == ["2026-08-01"]
+    assert "2026-08-01" in label
+
+
+def test_date_window_bare_until_extends_end_of_day():
+    _, params, _ = dd._stats_date_window(until="2026-08-15")
+    assert params == ["2026-08-15T23:59:59"]
+
+
+def _seed_stats_db(monkeypatch):
+    fd, db = tempfile.mkstemp(prefix="dd_stats_", suffix=".db")
+    os.close(fd); os.remove(db)
+    monkeypatch.setattr(dd, "DB_PATH", db)
+    from core.database import init_db
+    init_db(db)
+    conn = sqlite3.connect(db)
+    for i, started in enumerate(
+        ["2026-08-01T10:00:00", "2026-08-10T12:00:00", "2026-08-15T20:00:00"], 1
+    ):
+        conn.execute(
+            "INSERT INTO sessions (id, started_at, currency, game, strategy, "
+            "base_bet, multiplier, total_bets, wins, losses, profit, wagered) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (i, started, "usdt", "dice", "Flat", 0.0001, 2.0,
+             100 * i, 50 * i, 50 * i, 0.001 * i, 0.01 * i))
+    conn.commit(); conn.close()
+    return db
+
+
+def test_stats_since_filters_listing_and_totals(monkeypatch, capsys):
+    db = _seed_stats_db(monkeypatch)
+    try:
+        dd.cmd_stats(since="2026-08-10")
+        out = capsys.readouterr().out
+        assert "Session #3" in out and "Session #2" in out
+        assert "Session #1" not in out
+        assert "Range Totals" in out
+        assert "2026-08-10" in out
+    finally:
+        os.remove(db)
+
+
+def test_stats_until_bare_date_inclusive_end_of_day(monkeypatch, capsys):
+    db = _seed_stats_db(monkeypatch)
+    try:
+        dd.cmd_stats(until="2026-08-15")
+        out = capsys.readouterr().out
+        assert "Session #3" in out and "Session #1" in out
+    finally:
+        os.remove(db)
+
+
+def test_stats_no_filter_unchanged(monkeypatch, capsys):
+    db = _seed_stats_db(monkeypatch)
+    try:
+        dd.cmd_stats()
+        out = capsys.readouterr().out
+        assert "Session #1" in out and "Session #3" in out
+        assert "All-Time Totals" in out
+        assert "last 20" in out
+    finally:
+        os.remove(db)
+
+
+def test_since_until_are_modifiers_not_commands():
+    src = inspect.getsource(dd)
+    assert re.search(r'parser\.add_argument\("--since"', src)
+    assert not re.search(r'group\.add_argument\("--since"', src)
+    assert "cmd_stats(since=args.since, until=args.until)" in src
+
+
+def test_tg_analytics_parses_args_and_threads_where():
+    src = inspect.getsource(tg_handlers.cmd_analytics)
+    assert "context.args" in src
+    assert "started_at >= ?" in src and "started_at <= ?" in src
+    assert src.count("{where}") >= 5
+    assert "T23:59:59" in src
+    assert "Range" in src and "window_label" in src
+
+
+def test_tg_analytics_usage_hint_on_three_args():
+    src = inspect.getsource(tg_handlers.cmd_analytics)
+    assert "Usage: `/analytics" in src
+
+
+def test_tg_help_mentions_analytics_dates():
+    src = inspect.getsource(tg_handlers.cmd_help)
+    assert "/analytics [SINCE] [UNTIL]" in src
+
+
+def test_duckctl_stats_passes_args_through():
+    with open(os.path.join(_ROOT, "duckctl")) as f:
+        src = f.read()
+    body = re.search(r"cmd_stats\(\)\s*\{.*?^\}", src, re.DOTALL | re.MULTILINE).group(0)
+    assert '--stats "$@"' in body
+    assert re.search(r'stats\)\s+shift;\s+cmd_stats "\$@"', src)
