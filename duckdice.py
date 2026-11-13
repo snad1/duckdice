@@ -56,7 +56,7 @@ STATE_PATH   = os.environ.get("DUCKDICE_STATE_PATH",   os.path.expanduser("~/.du
 PID_PATH     = os.environ.get("DUCKDICE_PID_PATH",     os.path.expanduser("~/.duckdice_autobot.pid"))
 PRESET_PATH  = os.environ.get("DUCKDICE_PRESET_PATH",  os.path.expanduser("~/.duckdice_presets.json"))
 LOG_DIR      = os.environ.get("DUCKDICE_LOG_DIR",      os.path.expanduser("~/.duckdice_logs"))
-VERSION      = "1.6.0"
+VERSION      = "1.6.1"
 APP_ENV      = os.environ.get("APP_ENV", "production")
 
 # ── Daily rotating logger ──
