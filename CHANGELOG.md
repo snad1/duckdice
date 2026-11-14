@@ -1,5 +1,23 @@
 # Changelog
 
+## CLI v1.10.0 — Parallel lanes (2026-11-14)
+
+Mirrors WolfBet CLI v2.35.0 (parallel lanes) and v2.36.0 (`lane_split`); where the two differ, v2.36.0 code wins. Lane helpers come from `shared.core.lanes` (casino-shared E1-S5). Replays goated CLI v1.10.0 (E5-S6). TG unchanged.
+
+- **Lanes** — N independent bot processes on one account: `duckdice.py --daemon --lane K` (1–10). Each lane has its own session, chain, counters, stops, pauses and recurring / streak-reset cycle. Config file and stats DB are shared. Lane 1 keeps the classic state / pid paths, systemd unit and config writes; lane K > 1 uses `~/.duckdice_autobot_live.laneK.json` / `~/.duckdice_autobot.laneK.pid` (or `.laneK` on the `DUCKDICE_*_PATH` values) and logs with a `[LK]` prefix (API key still redacted). `--lane K` is applied before any command, so `--status` / `--monitor` / `--stop` / `--diagnose` act on that lane. Lane K's first bet waits `(K−1)·2 s`.
+- **DB** — new `sessions` rows carry `lane`.
+- **Money split** (`lanes.split`, `--config-set lane_split=MODE`): `none` (default: full base bet, no lane budget), `budget` (each lane may risk balance ÷ lanes), `bet` (base bet and `basebet_pct` ÷ lanes; a lane's own `base_bet` override is never divided; a split rounding to 0 stays full; a learned 422 minimum still floors `basebet_pct`), `both`. With a budget, the share is fixed at lane start and the lane stops with `Lane budget exceeded (next bet …, lane equity …)` when the next bet is larger than share + the lane's result across its sessions. That stop never restarts. The streak-reset chain-depth warning uses the lane share in `budget` / `both`. `save_config` writes the full base bet back when the split one is untouched.
+- **422 min-bet raise** — stays per lane (each lane learns the minimum itself). The raised bet goes through the lane budget check before the next bet, so a minimum above the lane equity stops the lane instead of betting it.
+- **Per-lane overrides** — `--config-set lanes=N`, `laneK.key=value`, `laneK.key=default` (also `unset` / `inherit`) write `lanes.count` / `lanes.overrides`. Values go through the normal `--config-set` validation (aliases, `mult` re-derives the chance). Shared-only keys are refused per lane: `api_key`, `currency`, `faucet`, `proxy`, `purge_days`, `db_write_mode`. A refused pair writes nothing. `save_config` keeps the `lanes` block; a lane ≥ 2 never writes the base config; SIGHUP reload merges the lane's overrides. A `laneK.*` change SIGHUPs that lane; a base `--config-set` SIGHUPs every running lane. `--config-show` prints the lane count, split mode and overrides.
+- **Faucet + lanes refused** — the faucet balance can't be split. `--config-set lanes=N` (N > 1) with faucet on exits 2 and writes nothing; a start with lanes > 1 and faucet on exits 2 before any session; the `[F]` hotkey won't turn faucet on while lanes > 1.
+- **`--benchmark N --lanes M`** — 1..M concurrent clients (each its own HTTP session, live proxy kept) fire N read-only `GET /bot/stats/{SYMBOL}` (key masked); req/s, scaling, p50, ok, 429s, then `recommend_lanes`. No rate-limit columns: DuckDice sends no quota headers.
+- **`--lanes-status`** — one row per lane state file (state, session, uptime, run, profit, lane equity, bps) plus total bps and P/L.
+- **Monitor `S` / systemd** — the stop uses this lane's unit (`duckdice` or `duckdice-lane@K`), so a systemd-managed lane is not respawned.
+- N/A: soft pacing from quota headers (none sent; each lane keeps its 429 backoff), the cross-lane `/auto/start` lock (no server-side auto-bet), `pipeline_depth` as a forbidden key (no pipeline). `duckctl lanes` and the lane unit template come with E7.
+- Tests: `tests/test_wolfbet_sync_e5_lanes.py` (66), incl. two lanes in threads on one fake account. `tests/conftest.py` sandboxes the lane base paths; `test_portability_v1.py` pins 1.10.0.
+
+`VERSION` `1.9.0` → `1.10.0`.
+
 ## CLI v1.9.0 — Observability and tooling (2026-11-14)
 
 Mirrors WolfBet CLI v2.17.0 and v2.30.3–v2.30.5 (metrics), v2.18.0 (wizard Step 5b + preset keys), v2.19.0 (`T` tweak), v2.22.1 / v2.32.1 (risky config + chain depth), v2.25.0 (`--config-show` / `--config-set` / `--version`), v2.26.0 (proxy, `purge_days`, `--cleanup`), v2.26.1 (`--benchmark` / `--diagnose`), v2.27.0 (async bet writer) and v2.28.1 (monitor footer, systemd-aware stop). TG unchanged.
