@@ -13,12 +13,17 @@ from .config import API_BASE, APP_ENV, logger
 from core.database import init_db, migrate_db, db_connect, cleanup_old_bets, cleanup_live_bets
 from core.strategy import StrategyRule, load_rules_from_text
 from core.engine import compute_next_bet, wolfrider_switch, apply_action, evaluate_rules
+from shared.core.session_rules import (
+    STREAK_RESET_REASON, record_outcome, streak_reset_triggered, streak_reset_stop_reason,
+)
 
 # ── Batching / periodic save constants ──────────────────
 BET_BATCH_SIZE     = 50      # flush bets + session stats to DB every N bets
 SESSION_SAVE_SECS  = 30      # fallback: save session stats every N seconds
 REQUEST_TIMEOUT    = httpx.Timeout(15.0, connect=5.0)
 MAX_TIMEOUT_STREAK = 3       # recreate HTTP session after this many consecutive timeouts
+RATE_LIMIT_MAX_WAIT = 30.0   # cap on the 2^n 429 backoff (Retry-After overrides)
+RATE_LIMIT_GIVE_UP  = 1800.0 # stop after this many cumulative seconds of 429 waits
 
 
 class BettingEngine:
@@ -67,6 +72,11 @@ class BettingEngine:
         self.max_bets        = config.get("max_bets")
         self.max_wins        = config.get("max_wins")
         self.stop_on_balance = config.get("stop_on_balance")
+        # Streak reset (WolfBet v2.32.0): stop on the first win after this many
+        # consecutive losses (profit >= 0 only); handlers restart after
+        # streak_reset_delay. The delay is kept here for /status only.
+        self.streak_reset_losses = config.get("streak_reset_losses")
+        self.streak_reset_delay  = config.get("streak_reset_delay")
 
         # ── session state ──
         self.running         = False
@@ -85,6 +95,8 @@ class BettingEngine:
         self.current_streak  = 0
         self.max_win_streak  = 0
         self.max_loss_streak = 0
+        # Length of the loss streak the latest win just broke (0 if none).
+        self.last_broken_loss_streak = 0
         self.highest_bet     = 0.0
         self.highest_win     = 0.0
         self.biggest_loss    = 0.0
@@ -124,8 +136,12 @@ class BettingEngine:
         self.stop_reason     = ""
 
         # ── rate limiting ──
-        self.rate_wait       = False
-        self.rate_backoff    = 2.0
+        # 429: Retry-After if sent, else 2^n s capped at 30 s; give up after
+        # 1800 s of cumulative waiting (same as cryptogames TG).
+        self._was_rate_limited      = False
+        self._rate_limit_wait       = 0.0
+        self._consecutive_429       = 0
+        self._rate_limit_total_wait = 0.0
         self.consecutive_errors = 0
         self._consecutive_timeouts = 0
         self.backoff_delay   = 1.0
@@ -338,9 +354,14 @@ class BettingEngine:
                 self.running = False
                 self.stop_reason = f"API validation error: {r.text[:120]}"
             elif r.status_code == 429:
-                self.rate_wait = True
-                self.rate_backoff = 2.0
-                self._set_error("Rate limit reached — cooling down")
+                self._was_rate_limited = True
+                try:
+                    self._rate_limit_wait = float(r.headers.get("Retry-After", 0))
+                except (TypeError, ValueError):
+                    self._rate_limit_wait = 0.0
+                self._set_error("Rate limit reached — cooling down",
+                                f"HTTP 429 on bet #{self.total_bets + 1} "
+                                f"(Retry-After={r.headers.get('Retry-After', 'n/a')})")
             else:
                 body = r.text or ""
                 if "insufficient" in body.lower():
@@ -358,7 +379,7 @@ class BettingEngine:
                 self._consecutive_timeouts = 0
         except Exception as e:
             err_str = str(e).lower()
-            if "insufficient" in err_str or "balance" in err_str:
+            if "insufficient" in err_str:
                 self._set_error("Insufficient balance")
                 self._insufficient_balance = True
             else:
@@ -418,6 +439,7 @@ class BettingEngine:
         if self.max_bets is not None:   stops["max_bets"] = self.max_bets
         if self.max_wins is not None:   stops["max_wins"] = self.max_wins
         if self.stop_on_balance is not None: stops["min_balance"] = self.stop_on_balance
+        if self.streak_reset_losses: stops["streak_reset_losses"] = self.streak_reset_losses
         if stops:
             snap["stops"] = stops
         if self.profit_threshold and self.profit_increment:
@@ -661,6 +683,10 @@ class BettingEngine:
             return True, f"Max wins: {self.wins}"
         if self.stop_on_balance is not None and b <= self.stop_on_balance:
             return True, f"Balance floor: {b:.8f}"
+        # Streak reset — only on the win that broke an N+ loss streak, not in the red.
+        if streak_reset_triggered(self.current_streak, self.last_broken_loss_streak,
+                                  self.streak_reset_losses, p):
+            return True, streak_reset_stop_reason(self.last_broken_loss_streak)
         return False, ""
 
     def _check_milestone(self, last_state: str) -> str:
@@ -746,6 +772,8 @@ class BettingEngine:
             "max_bets": self.max_bets,
             "max_wins": self.max_wins,
             "stop_on_balance": self.stop_on_balance,
+            "streak_reset_losses": self.streak_reset_losses,
+            "streak_reset_delay": self.streak_reset_delay,
             "profit_increment": self.profit_increment,
             "profit_threshold": self.profit_threshold,
             "proxy": self.proxy,
@@ -777,6 +805,7 @@ class BettingEngine:
             "current_streak": self.current_streak,
             "max_win_streak": self.max_win_streak,
             "max_loss_streak": self.max_loss_streak,
+            "last_broken_loss_streak": self.last_broken_loss_streak,
             "highest_bet": self.highest_bet,
             "highest_win": self.highest_win,
             "biggest_loss": self.biggest_loss,
@@ -804,6 +833,7 @@ class BettingEngine:
         self.current_streak    = snap["current_streak"]
         self.max_win_streak    = snap["max_win_streak"]
         self.max_loss_streak   = snap["max_loss_streak"]
+        self.last_broken_loss_streak = snap.get("last_broken_loss_streak", 0)
         self.highest_bet       = snap["highest_bet"]
         self.highest_win       = snap["highest_win"]
         self.biggest_loss      = snap["biggest_loss"]
@@ -893,6 +923,10 @@ class BettingEngine:
             v = changes["stop_on_balance"]
             self.stop_on_balance = float(v) if v is not None else None
             msgs.append(f"Min balance: {float(v):.8f}" if v is not None else "Min balance: off")
+        if "streak_reset_losses" in changes:
+            v = changes["streak_reset_losses"]
+            self.streak_reset_losses = int(v) if v is not None else None
+            msgs.append(f"Streak reset: after {v} losses" if v is not None else "Streak reset: off")
         if "milestone_bets" in changes:
             self.milestone_bets = int(changes["milestone_bets"])
             msgs.append(f"Milestone bets: {self.milestone_bets}")
@@ -1017,6 +1051,8 @@ class BettingEngine:
             "streak_delay_bets": self.streak_delay_bets,
             "streakbet_loss": self.streakbet_loss,
             "basebet_pct": self.basebet_pct,
+            "streak_reset_losses": self.streak_reset_losses,
+            "streak_reset_delay": self.streak_reset_delay,
             "rule": self.rule,
             "bet_value": self.bet_value,
             "win_mult": self.win_mult,
@@ -1051,6 +1087,14 @@ class BettingEngine:
         return status
 
     # ── BETTING LOOP ─────────────────────────────────────
+    async def _wait_running(self, delay: float):
+        """Sleep `delay` s in 0.25 s slices so /stop is not held by a long 429 wait."""
+        remaining = float(delay)
+        while remaining > 0 and self.running:
+            step = min(0.25, remaining)
+            await asyncio.sleep(step)
+            remaining -= step
+
     async def _betting_loop(self):
         last_result = "none"
         logger.info("User %d: Session #%d started", self.user_id, self.session_id)
@@ -1059,18 +1103,6 @@ class BettingEngine:
             if self.paused:
                 self.status = "PAUSED"
                 await asyncio.sleep(0.3)
-                continue
-
-            # rate limit recovery — wait then resume betting
-            if self.rate_wait:
-                backoff = self.rate_backoff
-                self.status = f"Rate limit — resuming in {backoff:.0f}s..."
-                for _ in range(int(backoff * 4)):
-                    if not self.running:
-                        break
-                    await asyncio.sleep(0.25)
-                self.rate_wait = False
-                self.rate_backoff = 2.0
                 continue
 
             # stop conditions
@@ -1113,6 +1145,26 @@ class BettingEngine:
                     await asyncio.to_thread(self._flush_bets)
                     await asyncio.to_thread(self._db_save_session, True)
                     break
+                if self._was_rate_limited:
+                    self._was_rate_limited = False
+                    self._consecutive_429 += 1
+                    if self._rate_limit_total_wait >= RATE_LIMIT_GIVE_UP:
+                        self.running = False
+                        self.stop_reason = "Rate limit persisted >30min — giving up"
+                        self.status = f"STOPPED: {self.stop_reason}"
+                        await asyncio.to_thread(self._flush_bets)
+                        await asyncio.to_thread(self._db_save_session, True)
+                        break
+                    delay = (self._rate_limit_wait if self._rate_limit_wait > 0
+                             else min(2 ** (self._consecutive_429 - 1), RATE_LIMIT_MAX_WAIT))
+                    self._rate_limit_total_wait += delay
+                    self.status = (f"Rate limited (429 #{self._consecutive_429}) — "
+                                   f"waiting {delay:.0f}s (total {self._rate_limit_total_wait:.0f}s)")
+                    logger.warning("User %d: 429 #%d — waiting %.1fs (cumulative %.0fs/%.0fs)",
+                                   self.user_id, self._consecutive_429, delay,
+                                   self._rate_limit_total_wait, RATE_LIMIT_GIVE_UP)
+                    await self._wait_running(delay)
+                    continue
                 self.consecutive_errors += 1
                 self.backoff_delay = min(self.backoff_delay * 2, 30.0)
                 await asyncio.sleep(self.backoff_delay)
@@ -1127,21 +1179,27 @@ class BettingEngine:
             raw_profit   = float(bet_data.get("profit", 0))
 
             self.consecutive_errors = 0
+            self._consecutive_429 = 0
+            self._rate_limit_total_wait = 0.0
             self.backoff_delay = 1.0
             self.total_bets += 1
             self.wagered    += amount_used
             self.profit     += raw_profit
             self.current_balance = new_balance
 
-            if bet_state == "win":
+            is_win = bet_state == "win"
+            if is_win:
                 self.wins += 1
                 if raw_profit > self.highest_win: self.highest_win = raw_profit
-                self.current_streak = max(self.current_streak, 0) + 1
-                self.max_win_streak = max(self.max_win_streak, self.current_streak)
             else:
                 self.losses += 1
                 if amount_used > self.biggest_loss: self.biggest_loss = amount_used
-                self.current_streak = min(self.current_streak, 0) - 1
+            self.current_streak, broken = record_outcome(self.current_streak, is_win)
+            if broken is not None:
+                self.last_broken_loss_streak = broken
+            if is_win:
+                self.max_win_streak = max(self.max_win_streak, self.current_streak)
+            else:
                 self.max_loss_streak = max(self.max_loss_streak, abs(self.current_streak))
 
             if amount_used > self.highest_bet: self.highest_bet = amount_used

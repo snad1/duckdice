@@ -37,6 +37,7 @@ CONFIG_KEYS = [
     "milestone_bets", "milestone_wins", "milestone_losses", "milestone_profit",
     "profit_increment", "profit_threshold", "faucet",
     "streak_delay_loss", "streak_delay_win", "streak_delay_bets",
+    "streak_reset_losses", "streak_reset_delay",
     "proxy",
 ]
 

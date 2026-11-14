@@ -13,7 +13,8 @@ query string:
     GET  /bot/stats/{SYMBOL}?api_key=K -> {"balances": {"main", "faucet"}}
 Read-only GETs (balance, the CLI's 429 probe) never consume the script.
 
-Script outcomes: win, loss, insufficient_balance, http_429, timeout.
+Script outcomes: win, loss, insufficient_balance, http_429, timeout,
+api_error_balance. Set `retry_after` to send a Retry-After header with 429s.
 An empty script answers insufficient_balance and sets `exhausted`.
 """
 
@@ -25,7 +26,8 @@ import httpx
 import requests
 
 API_BASE = "https://duckdice.io/api"
-OUTCOMES = {"win", "loss", "insufficient_balance", "http_429", "timeout"}
+OUTCOMES = {"win", "loss", "insufficient_balance", "http_429", "timeout",
+            "api_error_balance"}
 
 
 class UnexpectedRequest(BaseException):
@@ -48,6 +50,7 @@ class FakeCasino:
         self.calls = []        # (method, url, body) for every request
         self.bets = []         # {"outcome", "amount", "payout", "profit", "balance", "number", "faucet"}
         self.exhausted = False
+        self.retry_after = None  # Retry-After header value on 429 replies
         self.queue(*script)
 
     def queue(self, *outcomes):
@@ -87,6 +90,9 @@ class FakeCasino:
             raise FakeTimeout()
         if outcome == "http_429":
             return 429, {"error": "Too Many Attempts."}
+        if outcome == "api_error_balance":
+            # A rejection that mentions "balance" but is not insufficient funds.
+            return 200, {"error": "Balance currency not supported"}
         if outcome == "insufficient_balance" or amount > wallet:
             return 200, {"error": "Insufficient balance"}
 
@@ -116,6 +122,11 @@ class FakeCasino:
                      "balance": f"{self.faucet_balance if body['faucet'] else self.balance:.8f}"},
         }
 
+    def _headers(self, status: int) -> dict:
+        if status == 429 and self.retry_after is not None:
+            return {"Retry-After": str(self.retry_after)}
+        return {}
+
     # ── adapters ─────────────────────────────────────────
     def requests_api(self) -> "RequestsAPI":
         return RequestsAPI(self)
@@ -127,16 +138,16 @@ class FakeCasino:
                 status, payload = self.handle(request.method, str(request.url), body)
             except FakeTimeout:
                 raise httpx.ReadTimeout("fake timeout", request=request)
-            return httpx.Response(status, json=payload)
+            return httpx.Response(status, json=payload, headers=self._headers(status))
         return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 class FakeResponse:
-    def __init__(self, status: int, payload):
+    def __init__(self, status: int, payload, headers=None):
         self.status_code = status
         self._payload = payload
         self.text = json.dumps(payload)
-        self.headers = {}
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
@@ -154,7 +165,8 @@ class RequestsAPI:
 
     def _call(self, method, url, body):
         try:
-            return FakeResponse(*self.casino.handle(method, url, body or {}))
+            status, payload = self.casino.handle(method, url, body or {})
+            return FakeResponse(status, payload, self.casino._headers(status))
         except FakeTimeout:
             raise requests.exceptions.Timeout("fake timeout")
 
