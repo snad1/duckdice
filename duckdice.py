@@ -38,6 +38,8 @@ except ImportError:
     sys.exit(1)
 
 # ── Shared core imports (single source of truth) ─────────
+from shared.core.stats import stats_date_window, fmt_duration, sessions_time_span
+from shared.core.lanes import validate_lane
 from core.strategy import (
     STRATEGIES, STRATEGY_NAMES, STRATEGY_BY_NAME,
     RULE_ACTIONS, RULE_ACTION_LABELS, SEQ_MODES,
@@ -62,7 +64,7 @@ STATE_PATH   = os.environ.get("DUCKDICE_STATE_PATH",   os.path.expanduser("~/.du
 PID_PATH     = os.environ.get("DUCKDICE_PID_PATH",     os.path.expanduser("~/.duckdice_autobot.pid"))
 PRESET_PATH  = os.environ.get("DUCKDICE_PRESET_PATH",  os.path.expanduser("~/.duckdice_presets.json"))
 LOG_DIR      = os.environ.get("DUCKDICE_LOG_DIR",      os.path.expanduser("~/.duckdice_logs"))
-VERSION      = "1.7.0"
+VERSION      = "1.8.0"
 APP_ENV      = os.environ.get("APP_ENV", "production")
 
 # ── Daily rotating logger ──
@@ -1301,12 +1303,13 @@ def build_dashboard_screen() -> str:
     else:
         st_ind = _a("bold_red", "● STOPPED")
 
-    hdr_text = f"DuckDice v{VERSION}  #{state.session_id}  {uptime}  "
+    run_seg = f"  Run {fmt_duration(time.time() - state.run_started_at)}"
+    hdr_text = f"DuckDice v{VERSION}  #{state.session_id}  {uptime}{run_seg}  "
     # visible chars used: 4 + len(hdr_text) + len("● STATUS") + 1
     hdr_vis = 4 + len(hdr_text) + len("● STOPPED") + 1
     fill = max(0, term_w - hdr_vis)
     add(f"{_a('dim_blue', '─── ')}{_a('bold_cyan', f'DuckDice v{VERSION}')}"
-        f"{_a('white', f'  #{state.session_id}  {uptime}')}  {st_ind} "
+        f"{_a('white', f'  #{state.session_id}  {uptime}{run_seg}')}  {st_ind} "
         f"{_a('dim_blue', '─' * fill)}")
 
     # ── Row 2: Balance bar ────────────────────────────
@@ -2546,10 +2549,12 @@ def _build_monitor_screen(d: dict, bets: list, pid_alive: bool) -> str:
         st_ind = _a("bold_yellow", "● PAUSED")
     else:
         st_ind = _a("bold_red", "● STOPPED")
-    hdr_vis = 4 + len(f"DuckDice v{VERSION}  #{sid}  {uptime}  ") + len("● STOPPED") + 1
+    _run = d.get("run_uptime_sec")
+    run_seg = f"  Run {fmt_duration(_run)}" if _run is not None else ""
+    hdr_vis = 4 + len(f"DuckDice v{VERSION}  #{sid}  {uptime}{run_seg}  ") + len("● STOPPED") + 1
     fill = max(0, term_w - hdr_vis)
     add(f"{_a('dim_blue', '─── ')}{_a('bold_cyan', f'DuckDice v{VERSION}')}"
-        f"{_a('white', f'  #{sid}  {uptime}')}  {st_ind} "
+        f"{_a('white', f'  #{sid}  {uptime}{run_seg}')}  {st_ind} "
         f"{_a('dim_blue', '─' * fill)}")
 
     # ── Row 2: Balance bar ────────────────────────────
@@ -2838,6 +2843,8 @@ def cmd_status():
 
     rows = [
         ("Uptime",         uptime),
+        *([("Running for", fmt_duration(d["run_uptime_sec"]))]
+          if d.get("run_uptime_sec") is not None else []),
         ("Currency",       d.get("currency", "?").upper()),
         ("Strategy",       strat_str),
         ("Base / Current", f"{d.get('base_bet', 0):.8f} / {d.get('current_bet', 0):.8f}"),
@@ -2958,35 +2965,28 @@ def cmd_list_presets():
 # ══════════════════════════════════════════════════════════
 #  DATABASE QUERY COMMANDS
 # ══════════════════════════════════════════════════════════
-def _stats_date_window(since: str = None, until: str = None):
-    """Build an optional date-window clause for the sessions table.
-
-    Bare dates (YYYY-MM-DD) or full ISO timestamps. A bare `until` is
-    extended to end-of-day so the day is inclusive. ISO strings compare
-    correctly lexically in SQLite. Returns (clause, params, label).
-    """
-    conds, params = [], []
-    if since:
-        conds.append("started_at >= ?")
-        params.append(since)
-    if until:
-        u = until if len(until) > 10 else until + "T23:59:59"
-        conds.append("started_at <= ?")
-        params.append(u)
-    if not conds:
-        return "", [], ""
-    clause = " WHERE " + " AND ".join(conds)
-    label = f"  [{since or '…'} → {until or '…'}]"
-    return clause, params, label
+def _window_or_error(since: str = None, until: str = None, lane: int = None):
+    """stats_date_window, or None after printing the error (bad bound / lane)."""
+    try:
+        if lane is not None:
+            validate_lane(lane)
+        return stats_date_window(since, until, lane)
+    except ValueError as e:
+        console.print(f"[red]{e}[/]")
+        return None
 
 
-def cmd_stats(since: str = None, until: str = None):
-    """Show session statistics, optionally filtered to a date window."""
+def cmd_stats(since: str = None, until: str = None, lane: int = None):
+    """Show session statistics, optionally filtered to a date window / lane."""
     if not os.path.exists(DB_PATH):
         console.print("[yellow]No database found.[/]")
         return
+    init_db()   # migrate old DBs (sessions.lane) before querying
+    window = _window_or_error(since, until, lane)
+    if window is None:
+        return
+    where, params, window_label = window
     conn = _db_conn()
-    where, params, window_label = _stats_date_window(since, until)
     limit = 50 if (since or until) else 20
 
     # session list — fetch all columns
@@ -3000,7 +3000,8 @@ def cmd_stats(since: str = None, until: str = None):
                COALESCE(highest_win, 0), COALESCE(biggest_loss, 0),
                COALESCE(bets_per_minute, 0), COALESCE(bets_per_second, 0),
                COALESCE(peak_bps, 0), COALESCE(low_bps, 0),
-               COALESCE(peak_bpm, 0), COALESCE(low_bpm, 0)
+               COALESCE(peak_bpm, 0), COALESCE(low_bpm, 0),
+               COALESCE(lane, 1)
         FROM sessions{where} ORDER BY id DESC LIMIT ?
     """, (*params, limit)).fetchall()
 
@@ -3011,7 +3012,8 @@ def cmd_stats(since: str = None, until: str = None):
         sid, started, ended, cur, strat, mult, base, bets, wins, losses, \
             profit, wagered, start_bal, end_bal, mws, mls, \
             hi_bal, lo_bal, hi_win, big_loss, \
-            bpm, bps, s_peak_bps, s_low_bps, s_peak_bpm, s_low_bpm = r
+            bpm, bps, s_peak_bps, s_low_bps, s_peak_bpm, s_low_bpm, s_lane = r
+        lane_tag = f" [magenta]\\[L{s_lane}][/]" if s_lane and s_lane > 1 else ""
         bets = bets or 0
         wins = wins or 0
         losses = losses or 0
@@ -3053,7 +3055,7 @@ def cmd_stats(since: str = None, until: str = None):
         except Exception:
             pass
 
-        console.print(f"  [bold cyan]Session #{sid}[/]  [dim]{(started or '?').replace('T', ' ')} → {(ended or 'running').replace('T', ' ')}[/]{uptime_str}")
+        console.print(f"  [bold cyan]Session #{sid}[/]{lane_tag}  [dim]{(started or '?').replace('T', ' ')} → {(ended or 'running').replace('T', ' ')}[/]{uptime_str}")
         console.print(f"    [dim]Currency:[/] {cur or '?'}  [dim]Strategy:[/] {strat or '?'}  [dim]Mult:[/] {mult}x  [dim]Base:[/] {base:.8f}")
         console.print(f"    [dim]Bets:[/] {bets}  [dim]W:[/] [green]{wins}[/]  [dim]L:[/] [red]{losses}[/]  [dim]WR:[/] {wr}")
         console.print(f"    [dim]Speed:[/] {bps:.1f} avg/s  {bpm:.0f} avg/m  [dim]BPS:[/] {s_low_bps}-{s_peak_bps}/s  [dim]BPM:[/] {s_low_bpm}-{s_peak_bpm}/m")
@@ -3062,7 +3064,8 @@ def cmd_stats(since: str = None, until: str = None):
         console.print(f"    [dim]Streaks:[/] W+{mws}  L-{mls}  [dim]Best Win:[/] [green]+{hi_win:.8f}[/]  [dim]Worst Loss:[/] [red]-{big_loss:.8f}[/]")
         console.print()
 
-    # totals — honor the same date window as the listing
+    # totals — honor the same window as the listing (WolfBet v2.30.9)
+    span_first, span_last, span_sec, bet_sec = sessions_time_span(conn, where, params)
     totals = conn.execute(f"""
         SELECT COUNT(*), COALESCE(SUM(total_bets),0), COALESCE(SUM(wins),0),
                COALESCE(SUM(losses),0), COALESCE(SUM(profit),0), COALESCE(SUM(wagered),0),
@@ -3072,7 +3075,9 @@ def cmd_stats(since: str = None, until: str = None):
                COALESCE(MAX(highest_balance),0), COALESCE(MAX(highest_win),0),
                COALESCE(MAX(biggest_loss),0), COALESCE(AVG(bets_per_minute),0),
                COALESCE(MAX(peak_bps),0), COALESCE(MAX(peak_bpm),0),
-               COALESCE(AVG(bets_per_second),0)
+               COALESCE(AVG(bets_per_second),0),
+               COALESCE(MAX(wins),0), COALESCE(AVG(wins),0),
+               COALESCE(MAX(losses),0), COALESCE(AVG(losses),0)
         FROM sessions{where}
     """, tuple(params)).fetchone()
     conn.close()
@@ -3080,7 +3085,8 @@ def cmd_stats(since: str = None, until: str = None):
     sessions, tot_bets, tot_wins, tot_losses, tot_profit, tot_wagered, \
         best_ws, best_ls, best_profit, worst_profit, max_bets, avg_bets, \
         all_hi_bal, all_hi_win, all_big_loss, avg_bpm, \
-        all_peak_bps, all_peak_bpm, avg_bps = totals
+        all_peak_bps, all_peak_bpm, avg_bps, \
+        max_wins_s, avg_wins_s, max_losses_s, avg_losses_s = totals
     pc = "green" if tot_profit >= 0 else "red"
     ps = "+" if tot_profit >= 0 else ""
     wr = f"{tot_wins/tot_bets*100:.1f}%" if tot_bets > 0 else "—"
@@ -3090,8 +3096,12 @@ def cmd_stats(since: str = None, until: str = None):
     avg_pc = "green" if avg_pnl >= 0 else "red"
     avg_ps = "+" if avg_pnl >= 0 else ""
 
-    console.print(Rule(f"[bold cyan]{'Range' if (since or until) else 'All-Time'} Totals[/]{window_label}"))
-    console.print(f"  [dim]Sessions:[/]      {sessions}")
+    console.print(Rule(f"[bold cyan]{'Range' if (since or until or lane) else 'All-Time'} Totals[/]{window_label}"))
+    rng = (f"  [dim]({span_first.isoformat(' ', 'seconds')} → "
+           f"{span_last.isoformat(' ', 'seconds')})[/]") if span_first else ""
+    console.print(f"  [dim]Sessions:[/]      {sessions}{rng}")
+    console.print(f"  [dim]Time Span:[/]     {fmt_duration(span_sec)}   "
+                  f"[dim]Bet Time:[/] {fmt_duration(bet_sec)}")
     console.print(f"  [dim]Total Bets:[/]    {tot_bets}  (W {tot_wins} / L {tot_losses}  WR {wr})")
     console.print(f"  [dim]Wagered:[/]       {tot_wagered:.8f}")
     console.print(f"  [dim]Profit:[/]        [{pc}]{ps}{tot_profit:.8f}[/]")
@@ -3104,7 +3114,205 @@ def cmd_stats(since: str = None, until: str = None):
     console.print(f"  [dim]Best Streaks:[/]  W+{best_ws}  L-{best_ls}")
     console.print(f"  [dim]Speed:[/]         {avg_bps:.1f} avg/s  {avg_bpm:.0f} avg/m  [dim]Peak:[/] {int(all_peak_bps)}/s  {int(all_peak_bpm)}/m")
     console.print(f"  [dim]Bets/Session:[/]  Max {max_bets}  Avg {avg_bets:.0f}")
+    console.print(f"  [dim]Wins/Session:[/]  Max {max_wins_s}  Avg {avg_wins_s:.1f}")
+    console.print(f"  [dim]Losses/Session:[/] Max {max_losses_s}  Avg {avg_losses_s:.1f}")
     console.print()
+
+# -- Analytics (WolfBet v2.23.0 / v2.31.0 / v2.34.0 / v2.35.0) --------------
+_AGG_COLS = ("sessions", "bets", "wins", "losses", "profit", "wagered")
+_AGG_SQL = """COUNT(*), COALESCE(SUM(total_bets), 0), COALESCE(SUM(wins), 0),
+               COALESCE(SUM(losses), 0), COALESCE(SUM(profit), 0),
+               COALESCE(SUM(wagered), 0)"""
+
+
+def _analytics_lifetime(where: str = "", params=()) -> dict:
+    """Top-line aggregates over the window. All-zero on an empty DB."""
+    conn = _db_conn()
+    try:
+        row = conn.execute(f"""
+            SELECT COUNT(*), COALESCE(SUM(total_bets), 0), COALESCE(SUM(wins), 0),
+                   COALESCE(SUM(losses), 0), COALESCE(SUM(wagered), 0),
+                   COALESCE(SUM(profit), 0), COALESCE(MAX(profit), 0),
+                   COALESCE(MIN(profit), 0),
+                   SUM(CASE WHEN profit >= 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN profit <  0 THEN 1 ELSE 0 END)
+            FROM sessions{where}
+        """, tuple(params)).fetchone()
+    finally:
+        conn.close()
+    keys = ("sessions_total", "bets_total", "wins_total", "losses_total",
+            "wagered_total", "profit_total", "best_profit", "worst_profit",
+            "sessions_in_profit", "sessions_in_loss")
+    d = dict(zip(keys, row))
+    d["win_rate_pct"] = (d["wins_total"] / d["bets_total"] * 100) if d["bets_total"] > 0 else 0.0
+    d["sessions_in_profit"] = d["sessions_in_profit"] or 0
+    d["sessions_in_loss"] = d["sessions_in_loss"] or 0
+    return d
+
+
+def _analytics_group(key_sql: str, where: str = "", params=(),
+                     order: str = "profit DESC") -> list:
+    """Aggregate sessions grouped by key_sql (game / strategy / lane)."""
+    conn = _db_conn()
+    try:
+        rows = conn.execute(f"""
+            SELECT {key_sql} AS k, {_AGG_SQL}
+            FROM sessions{where}
+            GROUP BY k
+            ORDER BY {order}
+        """, tuple(params)).fetchall()
+    finally:
+        conn.close()
+    return [dict(zip(("key",) + _AGG_COLS, r)) for r in rows]
+
+
+def _analytics_by_game(where: str = "", params=()) -> list:
+    rows = _analytics_group("COALESCE(game, 'dice')", where, params, "6 DESC")
+    for r in rows:
+        r["key"] = str(r["key"]).title()
+    return rows
+
+
+def _analytics_by_strategy(where: str = "", params=()) -> list:
+    return _analytics_group("COALESCE(strategy, '?')", where, params, "6 DESC")
+
+
+def _analytics_by_lane(where: str = "", params=()) -> list:
+    rows = _analytics_group("COALESCE(lane, 1)", where, params, "k")
+    for r in rows:
+        r["key"] = f"Lane {r['key']}"
+    return rows
+
+
+def _analytics_top_sessions(order: str = "profit_desc", limit: int = 5,
+                            where: str = "", params=()) -> list:
+    """Top-N sessions by a whitelisted order key."""
+    order_sql = {
+        "profit_desc": "profit DESC",
+        "profit_asc":  "profit ASC",
+        "bets_desc":   "total_bets DESC",
+    }.get(order, "profit DESC")
+    conn = _db_conn()
+    try:
+        rows = conn.execute(f"""
+            SELECT id, COALESCE(game, 'dice'), COALESCE(strategy, '?'),
+                   COALESCE(total_bets, 0), COALESCE(wins, 0), COALESCE(losses, 0),
+                   COALESCE(profit, 0), COALESCE(wagered, 0), started_at
+            FROM sessions{where}
+            ORDER BY {order_sql}
+            LIMIT ?
+        """, (*params, limit)).fetchall()
+    finally:
+        conn.close()
+    out = [dict(zip(("id", "game", "strategy", "bets", "wins", "losses",
+                     "profit", "wagered", "started_at"), r)) for r in rows]
+    for r in out:
+        r["game"] = str(r["game"]).title()
+    return out
+
+
+def _print_analytics_table(title: str, rows: list, key_label: str):
+    if not rows:
+        return
+    t = Table(title=title, box=box.SIMPLE, expand=True)
+    t.add_column(key_label, style="cyan")
+    t.add_column("Sessions", justify="right")
+    t.add_column("Bets",     justify="right")
+    t.add_column("Win rate", justify="right")
+    t.add_column("P/L",      justify="right")
+    t.add_column("Wagered",  justify="right")
+    for r in rows:
+        wr = f"{r['wins']/r['bets']*100:.1f}%" if r['bets'] > 0 else "—"
+        pc = 'green' if r['profit'] >= 0 else 'red'
+        ps = '+' if r['profit'] >= 0 else ''
+        t.add_row(str(r['key']), f"{r['sessions']:,}", f"{r['bets']:,}",
+                  wr, f"[{pc}]{ps}{r['profit']:.8f}[/]", f"{r['wagered']:.8f}")
+    console.print(t)
+
+
+def _print_top_sessions_table(title: str, rows: list):
+    if not rows:
+        return
+    t = Table(title=title, box=box.SIMPLE, expand=True)
+    t.add_column("ID",       justify="right")
+    t.add_column("Game",     style="cyan")
+    t.add_column("Strategy", style="magenta")
+    t.add_column("Bets",     justify="right")
+    t.add_column("Win rate", justify="right")
+    t.add_column("P/L",      justify="right")
+    t.add_column("Wagered",  justify="right")
+    t.add_column("Started",  style="dim")
+    for r in rows:
+        wr = f"{r['wins']/r['bets']*100:.1f}%" if r['bets'] > 0 else "—"
+        pc = 'green' if r['profit'] >= 0 else 'red'
+        ps = '+' if r['profit'] >= 0 else ''
+        started_short = (r['started_at'] or "").replace("T", " ")[:19]
+        t.add_row(str(r['id']), str(r['game']), str(r['strategy']), f"{r['bets']:,}",
+                  wr, f"[{pc}]{ps}{r['profit']:.8f}[/]", f"{r['wagered']:.8f}",
+                  started_short)
+    console.print(t)
+
+
+def cmd_analytics(since: str = None, until: str = None, lane: int = None):
+    """Aggregates over saved sessions, optionally windowed by started_at / lane."""
+    if not os.path.exists(DB_PATH):
+        console.print("[yellow]No database found — run a session first.[/]")
+        return
+    init_db()   # migrate old DBs (sessions.lane) before querying
+    window = _window_or_error(since, until, lane)
+    if window is None:
+        return
+    where, wparams, wlabel = window
+    lifetime = _analytics_lifetime(where, wparams)
+    if lifetime["sessions_total"] == 0:
+        console.print("[yellow]No sessions in the DB yet — run a session first.[/]")
+        return
+
+    console.print(Rule(
+        f"[bold cyan]{'Range' if (since or until or lane) else 'Lifetime'} analytics[/] — "
+        f"{lifetime['sessions_total']:,} sessions, "
+        f"{lifetime['bets_total']:,} bets, {lifetime['wagered_total']:.8f} wagered"
+        f"{wlabel}"))
+
+    p = lifetime['profit_total']
+    pc = 'green' if p >= 0 else 'red'
+    ps = '+' if p >= 0 else ''
+    grid = Table.grid(padding=(0, 2))
+    grid.add_row("Total sessions:", f"{lifetime['sessions_total']:,}")
+    conn = _db_conn()
+    try:
+        a_first, a_last, a_span, a_bet = sessions_time_span(conn, where, wparams)
+    finally:
+        conn.close()
+    if a_first:
+        grid.add_row("Time range:", f"{a_first.isoformat(' ', 'seconds')} → "
+                                    f"{a_last.isoformat(' ', 'seconds')}")
+    grid.add_row("Time span:",          fmt_duration(a_span))
+    grid.add_row("Bet time:",           fmt_duration(a_bet))
+    grid.add_row("Sessions in profit:", f"{lifetime['sessions_in_profit']:,}")
+    grid.add_row("Sessions in loss:",   f"{lifetime['sessions_in_loss']:,}")
+    grid.add_row("Total bets:", f"{lifetime['bets_total']:,}   W: {lifetime['wins_total']:,}   L: {lifetime['losses_total']:,}")
+    grid.add_row("Win rate:",           f"{lifetime['win_rate_pct']:.1f}%")
+    grid.add_row("Total wagered:",      f"{lifetime['wagered_total']:.8f}")
+    grid.add_row("Total P/L:",          f"[{pc}]{ps}{p:.8f}[/]")
+    grid.add_row("Best session:",       f"+{lifetime['best_profit']:.8f}")
+    grid.add_row("Worst session:",      f"{lifetime['worst_profit']:.8f}")
+    console.print(Panel(grid, title="[bold]💰 Overall[/]", border_style=pc))
+
+    _print_analytics_table("[bold]🎲 By game[/]",     _analytics_by_game(where, wparams),     "Game")
+    _print_analytics_table("[bold]🎯 By strategy[/]", _analytics_by_strategy(where, wparams), "Strategy")
+    by_lane = _analytics_by_lane(where, wparams)
+    if len(by_lane) > 1:
+        _print_analytics_table("[bold]🛣 By lane[/]", by_lane, "Lane")
+
+    _print_top_sessions_table("[bold]🏆 Top 5 best sessions[/]",
+                              _analytics_top_sessions("profit_desc", 5, where, wparams))
+    _print_top_sessions_table("[bold]🔻 Top 5 worst sessions[/]",
+                              _analytics_top_sessions("profit_asc", 5, where, wparams))
+
+    console.print("\n[dim]  Use --stats for recent 20 sessions in detail, "
+                  "or --session-bets ID to drill into one.[/]\n")
+
 
 def cmd_last_bets(n: int):
     """Show last N bets from database."""
@@ -3373,12 +3581,18 @@ def main():
     group.add_argument("--stop",    action="store_true", help="Stop a running daemon session")
     group.add_argument("--list-presets", action="store_true", help="List saved presets")
     group.add_argument("--stats",   action="store_true", help="Show all-time session statistics")
+    group.add_argument("--analytics", action="store_true",
+                       help="Lifetime aggregates: by game, by strategy, by lane, top 5 best/worst")
     group.add_argument("--last-bets", type=int, metavar="N", help="Show last N bets from database")
     group.add_argument("--session-bets", type=int, metavar="ID", help="Show bets for a specific session")
     # modifiers, not commands: must combine WITH --stats, so they live on the
     # standalone parser, NOT the mutually-exclusive command group.
-    parser.add_argument("--since", metavar="DATE", help="With --stats: window start (YYYY-MM-DD or ISO ts)")
-    parser.add_argument("--until", metavar="DATE", help="With --stats: window end (bare date = inclusive end of day)")
+    parser.add_argument("--since", metavar="DATE",
+                        help="With --stats/--analytics: window start (YYYY-MM-DD[ HH:MM[:SS]])")
+    parser.add_argument("--until", metavar="DATE",
+                        help="With --stats/--analytics: window end (bare date = inclusive end of day)")
+    parser.add_argument("--lane", type=int, metavar="K", default=None,
+                        help="With --stats/--analytics: only that lane's sessions")
     parser.add_argument("--preset", type=str, metavar="NAME",
                         help="Load a named preset and start (skips wizard)")
     parser.add_argument("--verbose", action="store_true",
@@ -3405,7 +3619,10 @@ def main():
         cmd_list_presets()
         return
     if args.stats:
-        cmd_stats(since=args.since, until=args.until)
+        cmd_stats(since=args.since, until=args.until, lane=args.lane)
+        return
+    if args.analytics:
+        cmd_analytics(since=args.since, until=args.until, lane=args.lane)
         return
     if args.last_bets:
         cmd_last_bets(args.last_bets)

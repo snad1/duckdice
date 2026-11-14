@@ -93,7 +93,8 @@ duckctl start             # Start CLI bot as daemon
 duckctl stop              # Stop CLI bot
 duckctl monitor           # Attach live TUI to running daemon
 duckctl status            # Check running session status
-duckctl stats             # Session statistics (--since/--until DATE for a window)
+duckctl stats             # Session statistics (--since/--until DATE, --lane K)
+duckctl analytics         # Aggregates by game / strategy / lane, top 5 (same flags)
 
 duckctl tg env            # Edit .env (set Telegram token)
 duckctl tg start          # Start Telegram bot
@@ -225,6 +226,9 @@ python3 duckdice.py --setup-only      # Wizard only, don't start
 python3 duckdice.py --stats           # Session history + totals
 python3 duckdice.py --stats --since 2026-08-01 --until 2026-08-15
                                       # Date-windowed stats (bare date = inclusive)
+python3 duckdice.py --stats --since "2026-11-13 14:00"  # Window from a time of day
+python3 duckdice.py --analytics       # Aggregates: by game, strategy, lane, top 5 best/worst
+python3 duckdice.py --analytics --since 2026-11-01 --lane 2  # Windowed, one lane
 python3 duckdice.py --last-bets N     # Last N bets across sessions
 python3 duckdice.py --session-bets N  # Full stats + streaks for session N
 python3 duckdice.py --verbose         # Enable DEBUG logging
