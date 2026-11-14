@@ -14,7 +14,8 @@ query string:
 Read-only GETs (balance, the CLI's 429 probe) never consume the script.
 
 Script outcomes: win, loss, insufficient_balance, http_429, timeout,
-api_error_balance. Set `retry_after` to send a Retry-After header with 429s.
+api_error_balance, min_bet_422 (HTTP 422 "Minimum bet …" with params.amount =
+`min_bet`). Set `retry_after` to send a Retry-After header with 429s.
 An empty script answers insufficient_balance and sets `exhausted`.
 """
 
@@ -27,7 +28,7 @@ import requests
 
 API_BASE = "https://duckdice.io/api"
 OUTCOMES = {"win", "loss", "insufficient_balance", "http_429", "timeout",
-            "api_error_balance"}
+            "api_error_balance", "min_bet_422"}
 
 
 class UnexpectedRequest(BaseException):
@@ -51,6 +52,7 @@ class FakeCasino:
         self.bets = []         # {"outcome", "amount", "payout", "profit", "balance", "number", "faucet"}
         self.exhausted = False
         self.retry_after = None  # Retry-After header value on 429 replies
+        self.min_bet = 0.02      # params.amount on a min_bet_422 reply
         self.queue(*script)
 
     def queue(self, *outcomes):
@@ -90,6 +92,9 @@ class FakeCasino:
             raise FakeTimeout()
         if outcome == "http_429":
             return 429, {"error": "Too Many Attempts."}
+        if outcome == "min_bet_422":
+            return 422, {"error": f"Minimum bet is {self.min_bet:.8f}",
+                         "params": {"amount": f"{self.min_bet:.8f}"}}
         if outcome == "api_error_balance":
             # A rejection that mentions "balance" but is not insufficient funds.
             return 200, {"error": "Balance currency not supported"}
