@@ -56,7 +56,8 @@ usage() {
     echo "    duckctl web update   Update web app files"
     echo ""
     echo "  DATA:"
-    echo "    duckctl stats       Session statistics (--since/--until DATE for a window)"
+    echo "    duckctl stats       Session statistics (--since/--until DATE, --lane K)"
+    echo "    duckctl analytics   Aggregates: by game, strategy, lane, top 5 (same flags)"
     echo "    duckctl session ID  Full stats + streak distribution"
     echo "    duckctl presets     List saved presets"
     echo "    duckctl update      Update bot from current directory"
@@ -160,6 +161,10 @@ cmd_tmux() {
 
 cmd_stats() {
     "$PYTHON" "$BOT" --stats "$@"
+}
+
+cmd_analytics() {
+    "$PYTHON" "$BOT" --analytics "$@"
 }
 
 cmd_session() {
@@ -466,6 +471,7 @@ case "${1:-}" in
     interactive) cmd_interactive ;;
     tmux)        cmd_tmux ;;
     stats)       shift; cmd_stats "$@" ;;
+    analytics)   shift; cmd_analytics "$@" ;;
     session)     cmd_session "${2:-}" ;;
     presets)     cmd_presets ;;
     update)      cmd_update ;;

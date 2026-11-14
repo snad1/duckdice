@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from shared.core.database import (  # noqa: E402
     SESSIONS_SCHEMA,
-    cleanup_old_bets, cleanup_live_bets, db_connect, secure_path,
+    cleanup_old_bets, cleanup_live_bets, db_connect, ensure_sessions_lane, secure_path,
 )
 
 
@@ -63,5 +63,6 @@ def migrate_db(db_path: str):
             c.execute(f"ALTER TABLE sessions ADD COLUMN {col} {defn}")
         except sqlite3.OperationalError:
             pass
+    ensure_sessions_lane(c)   # CLI v1.8.0 — sessions.lane (WolfBet v2.35.0); old rows = lane 1
     conn.commit()
     conn.close()
