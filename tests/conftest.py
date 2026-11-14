@@ -48,6 +48,9 @@ def sleeps():
 def _sandbox(tmp_path, monkeypatch, sleeps):
     for name in ("DB_PATH", "CONFIG_PATH", "STATE_PATH", "PID_PATH", "PRESET_PATH"):
         monkeypatch.setattr(dd, name, str(tmp_path / f"cli_{name.lower()}"))
+    # v1.10.0 — lane paths derive from the lane-1 (base) state / pid paths.
+    monkeypatch.setattr(dd, "_BASE_STATE_PATH", dd.STATE_PATH)
+    monkeypatch.setattr(dd, "_BASE_PID_PATH", dd.PID_PATH)
     monkeypatch.setattr(tg_database, "DATA_DIR", str(tmp_path / "tg"))
     monkeypatch.setattr(dd, "state", dd.BotState())
 

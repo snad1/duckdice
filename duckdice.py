@@ -42,7 +42,13 @@ except ImportError:
 
 # ── Shared core imports (single source of truth) ─────────
 from shared.core.stats import stats_date_window, fmt_duration, sessions_time_span
-from shared.core.lanes import validate_lane
+from shared.core.lanes import (
+    LANES_MAX, LANE_UNSET_VALUES, LANE_SPLIT_HELP,
+    lane_path, validate_lane, lanes_count, lane_split, lane_config,
+    lane_overrides, split_budget_on, split_bet_divisor, split_lane_pairs,
+    check_lane_keys, lane_share, lane_equity, lane_budget_exceeded,
+    recommend_lanes,
+)
 from core.strategy import (
     STRATEGIES, STRATEGY_NAMES, STRATEGY_BY_NAME,
     RULE_ACTIONS, RULE_ACTION_LABELS, SEQ_MODES,
@@ -67,7 +73,7 @@ STATE_PATH   = os.environ.get("DUCKDICE_STATE_PATH",   os.path.expanduser("~/.du
 PID_PATH     = os.environ.get("DUCKDICE_PID_PATH",     os.path.expanduser("~/.duckdice_autobot.pid"))
 PRESET_PATH  = os.environ.get("DUCKDICE_PRESET_PATH",  os.path.expanduser("~/.duckdice_presets.json"))
 LOG_DIR      = os.environ.get("DUCKDICE_LOG_DIR",      os.path.expanduser("~/.duckdice_logs"))
-VERSION      = "1.9.0"
+VERSION      = "1.10.0"
 APP_ENV      = os.environ.get("APP_ENV", "production")
 
 # ── Daily rotating logger ──
@@ -92,6 +98,42 @@ _log_handler.setFormatter(_RedactingFormatter(
     "%(asctime)s  %(levelname)-7s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
 ))
 logger.addHandler(_log_handler)
+
+# ══════════════════════════════════════════════════════════
+#  PARALLEL LANES  (v1.10.0 — WolfBet v2.35.0 / v2.36.0)
+# ══════════════════════════════════════════════════════════
+# A lane is one bot process with its own session, chain, counters, stops and
+# pauses. Lane 1 keeps the classic paths; lanes 2..N run side by side on the
+# same account, config file and stats DB (`--lane K`). Helpers: shared.core.lanes.
+_BASE_STATE_PATH, _BASE_PID_PATH = STATE_PATH, PID_PATH
+
+# Never overridable per lane: credentials, account, network and storage
+# settings, and faucet (the faucet balance can't be split between lanes).
+_LANE_FORBIDDEN_KEYS = frozenset({
+    "api_key", "currency", "faucet", "proxy", "purge_days", "db_write_mode",
+})
+
+_FAUCET_LANES_MSG = ("Faucet mode can't run with parallel lanes: the faucet balance "
+                     "can't be split. Set lanes=1 or faucet off.")
+
+
+def _faucet_lanes_conflict(count: int, faucet) -> Optional[str]:
+    """v1.10.0 — the refusal message when lanes > 1 meets faucet mode, else None."""
+    return _FAUCET_LANES_MSG if count > 1 and bool(faucet) else None
+
+
+def _apply_lane(lane) -> None:
+    """Switch this process to lane `lane`: state/pid paths + `[LK]` log prefix.
+    Raises ValueError outside 1..LANES_MAX."""
+    global STATE_PATH, PID_PATH
+    lane = validate_lane(lane)
+    state.lane = lane
+    if lane > 1:
+        STATE_PATH = lane_path(_BASE_STATE_PATH, lane)
+        PID_PATH = lane_path(_BASE_PID_PATH, lane)
+        _log_handler.setFormatter(_RedactingFormatter(
+            f"%(asctime)s  %(levelname)-7s  [L{lane}] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"))
 
 CURRENCIES  = ["btc", "eth", "ltc", "doge", "trx", "bch", "xrp", "usdt", "bnb", "usdc", "sol", "xlm"]
 
@@ -215,7 +257,19 @@ def _redact(text) -> str:
     return text
 
 def save_config():
+    if state.lane > 1:
+        # v1.10.0 (WolfBet v2.35.0) — a lane's state holds base + its overrides;
+        # writing it back would leak them into the shared base config.
+        logger.info("save_config skipped on lane %d (base config is lane 1's)", state.lane)
+        return
     data = _serialize_keys(_CONFIG_KEYS)
+    # v1.10.0 (WolfBet v2.36.0) — an untouched split base bet is saved as the full one.
+    if state.base_bet_split is not None and state.base_bet == state.base_bet_split:
+        data["base_bet"] = state.base_bet_disk
+    # v1.10.0 (WolfBet v2.35.0) — keep the lanes block (count, split, overrides).
+    old = _read_config_raw()
+    if old is not None and "lanes" in old:
+        data["lanes"] = old["lanes"]
     fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(data, f, indent=2)
@@ -228,6 +282,7 @@ def load_config() -> bool:
         with open(CONFIG_PATH) as f:
             data = json.load(f)
         _apply_loaded(data, _CONFIG_KEYS)
+        _apply_lane_config(data)
         # Environment variable override for API key (ISO 27001: no hardcoded secrets)
         env_key = os.environ.get("DUCKDICE_API_KEY")
         if env_key:
@@ -236,6 +291,54 @@ def load_config() -> bool:
         return True
     except Exception:
         return False
+
+def _read_config_raw() -> Optional[dict]:
+    """The saved config file as a dict, or None when missing / unreadable."""
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_config_raw(data: dict) -> None:
+    fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _apply_lane_config(data: dict) -> None:
+    """v1.10.0 (WolfBet v2.35.0 / v2.36.0) — lane count, split mode and this
+    lane's overrides + bet split on top of the base values already applied."""
+    state.lanes_count = lanes_count(data)
+    state.lane_split = lane_split(data)
+    merged, warning = lane_config(data, state.lane, _LANE_FORBIDDEN_KEYS)
+    if warning:
+        logger.warning(warning)
+    state.base_bet_disk = data.get("base_bet")
+    state.base_bet_split = (merged.get("base_bet")
+                            if merged.get("base_bet") != data.get("base_bet") else None)
+    changed = False
+    for k, v in merged.items():
+        if k in data and data[k] == v:
+            continue                      # base value, already applied
+        if k in _STREAK_TUPLE_KEYS:
+            setattr(state, k, parse_streak_delay(v))
+        elif k in _CONFIG_KEYS:
+            setattr(state, k, v)
+        else:
+            continue
+        changed = True
+    if changed:
+        for msg in _clamp_delays():
+            console.print(f"[yellow]{msg}[/]")
+        _sanitize_tooling_keys()
+        state.current_bet = state.base_bet
+        if state.profit_threshold:
+            state.next_profit_milestone = state.profit_threshold
+        if "custom_rules_text" in merged and state.custom_rules_text:
+            state.custom_rules = _load_rules_from_text(state.custom_rules_text)
 
 # ══════════════════════════════════════════════════════════
 #  PRESETS
@@ -279,6 +382,8 @@ def _reload_live_config() -> dict:
     except Exception as e:
         logger.warning("live reload: failed to parse config: %s", e)
         return {}
+    # v1.10.0 (WolfBet v2.35.0 / v2.36.0) — this lane's overrides + bet split.
+    data = lane_config(data, state.lane, _LANE_FORBIDDEN_KEYS)[0]
     applied, skipped = {}, []
     tuple_keys = set(_STREAK_TUPLE_KEYS)
     with state.lock:
@@ -571,6 +676,18 @@ class BotState:
         self.purge_days   : int = 3
         self.db_write_mode: str = "async"
 
+        # ── v1.10.0 parallel lanes (WolfBet v2.35.0 / v2.36.0) ──
+        # lane_share None = no split budget. lane_run_profit carries the
+        # lane's result across its sessions (recurring / streak-reset cycles).
+        self.lane            = 1
+        self.lanes_count     = 1
+        self.lane_split      = "none"     # see shared.core.lanes.LANE_SPLIT_MODES
+        self.lane_share      : Optional[float] = None
+        self.lane_run_profit = 0.0
+        # On-disk vs split base bet, so save_config never writes the split one.
+        self.base_bet_disk   = None
+        self.base_bet_split  = None
+
 
 state   = BotState()
 console = Console()
@@ -727,10 +844,14 @@ def _check_risky_config() -> list:
             "on a bad streak. Consider `maxloss <amount>` ([T]weak or --config-set) "
             "to establish a floor."
         )
-    depth = martingale_chain_depth(bal, float(state.base_bet or 0), loss_mult)
+    # v1.10.0 (WolfBet v2.35.0) — with a lane budget, a lane may only risk its share.
+    split = split_budget_on(state.lanes_count, state.lane_split)
+    bank = bal / state.lanes_count if split else bal
+    depth = martingale_chain_depth(bank, float(state.base_bet or 0), loss_mult)
     if sk in ("2", "7") and state.streak_reset_losses and state.max_loss is None and depth:
         warnings.append(
-            f"Streak reset with no `max_loss`: balance covers a {depth}-loss chain. "
+            f"Streak reset with no `max_loss`: {'lane share' if split else 'balance'} "
+            f"covers a {depth}-loss chain. "
             f"Loss {depth + 1} in a row ends the session with insufficient balance."
         )
     if sk == "3" and state.max_profit is None:
@@ -1115,6 +1236,8 @@ def api_place_bet(amount: float) -> Optional[dict]:
                     min_bet = float(min_amount)
                     logger.warning("MIN BET %.8f — adjusting base_bet and current_bet",
                                    min_bet)
+                    # v1.10.0 — per lane (state is per process). The next
+                    # should_stop() checks the raised bet against lane equity.
                     with state.lock:
                         state.min_bet = min_bet   # floor for basebet_pct, kept across cycles
                         state.base_bet = min_bet
@@ -1198,7 +1321,26 @@ def should_stop() -> tuple:
     if streak_reset_triggered(state.current_streak, state.last_broken_loss_streak,
                               state.streak_reset_losses, p):
         return True, streak_reset_stop_reason(state.last_broken_loss_streak)
+    # v1.10.0 (WolfBet v2.35.0) — split budget: a lane may only risk its share.
+    # Not on the restart whitelist, so the lane stops for good.
+    over, reason = lane_budget_exceeded(state.current_bet, lane_equity_now())
+    if over:
+        return True, reason
     return False, ""
+
+
+def lane_equity_now() -> Optional[float]:
+    """Money this lane may still risk: share + its result so far. None = no split."""
+    return lane_equity(state.lane_share, state.lane_run_profit, state.profit)
+
+
+def _init_lane_budget() -> None:
+    """v1.10.0 (WolfBet v2.35.0) — fix this lane's share of the balance at bot start."""
+    state.lane_share = lane_share(state.current_balance, state.lanes_count, state.lane_split)
+    if state.lane_share is not None:
+        logger.warning("LANE %d/%d  share=%.8f of balance %.8f",
+                       state.lane, state.lanes_count, state.lane_share,
+                       state.current_balance)
 
 
 def _apply_basebet_pct() -> bool:
@@ -1206,7 +1348,10 @@ def _apply_basebet_pct() -> bool:
     minimum). Returns True if it changed."""
     if state.basebet_pct <= 0 or state.current_balance <= 0:
         return False
-    new_base = max(state.min_bet, round(state.current_balance * state.basebet_pct, 8))
+    # v1.10.0 (WolfBet v2.36.0) — bet split divides by the lane count.
+    new_base = max(state.min_bet, round(state.current_balance * state.basebet_pct
+                                        / split_bet_divisor(state.lanes_count,
+                                                            state.lane_split), 8))
     if new_base <= 0 or abs(new_base - state.base_bet) < 1e-12:
         return False
     with state.lock:
@@ -1270,6 +1415,8 @@ def _reset_session_for_recurring(delay: float) -> None:
         state.total_bets     = 0
         state.wins           = 0
         state.losses         = 0
+        # v1.10.0 (WolfBet v2.35.0) — lane equity carries the lane's result.
+        state.lane_run_profit += state.profit
         state.profit         = 0.0
         state.wagered        = 0.0
         state.current_streak = 0
@@ -1556,12 +1703,13 @@ def _db_start_session() -> int:
     c = conn.cursor()
     c.execute("""
         INSERT INTO sessions
-            (started_at, currency, game, strategy, base_bet, multiplier, start_balance)
-        VALUES (?,?,?,?,?,?,?)
+            (started_at, currency, game, strategy, base_bet, multiplier, start_balance, lane)
+        VALUES (?,?,?,?,?,?,?,?)
     """, (
         datetime.now().isoformat(),
         state.currency, state.game, state.strategy,
         state.base_bet, state.multiplier, state.start_balance,
+        state.lane,
     ))
     conn.commit()
     sid = c.lastrowid
@@ -1841,6 +1989,12 @@ def _save_state_file():
             # v1.9.0 — observability (WolfBet v2.17.0 / v2.30.3-v2.30.5 / v2.27.0)
             **_metrics_state_dict(),
             "purge_days": state.purge_days,
+            # v1.10.0 (WolfBet v2.35.0 / v2.36.0) — parallel lanes
+            "lane": state.lane,
+            "lanes_count": state.lanes_count,
+            "lane_share": state.lane_share,
+            "lane_split": state.lane_split,
+            "lane_equity": lane_equity_now(),
             "proxy": mask_proxy(state.proxy) if state.proxy else "direct",
             "status": state.status,
             "last_error": state.last_error,
@@ -2262,8 +2416,13 @@ def input_handler():
             state.paused = False
             state.status = "Resumed"
         elif ch == "f":
-            state.faucet = not state.faucet
-            state.status = f"Faucet mode: {'ON' if state.faucet else 'OFF'}"
+            # v1.10.0 — faucet can't run with parallel lanes.
+            refusal = _faucet_lanes_conflict(state.lanes_count, not state.faucet)
+            if refusal:
+                state.status = refusal
+            else:
+                state.faucet = not state.faucet
+                state.status = f"Faucet mode: {'ON' if state.faucet else 'OFF'}"
         elif ch == "h":
             show_history()
         elif ch == "t":
@@ -3362,6 +3521,11 @@ def _build_config_progress_row(d: dict) -> str:
 _MONITOR_FIXED_ROWS = 13
 
 
+def _service_unit() -> str:
+    """systemd unit of this lane: duckdice (lane 1) or duckdice-lane@K (v1.10.0)."""
+    return "duckdice" if state.lane <= 1 else f"duckdice-lane@{state.lane}"
+
+
 def _is_systemd_managed(pid) -> bool:
     """True when `pid` runs inside the duckdice systemd unit (WolfBet v2.28.1).
 
@@ -3372,7 +3536,7 @@ def _is_systemd_managed(pid) -> bool:
         return False
     try:
         with open(f"/proc/{pid}/cgroup", "r") as f:
-            return "/duckdice.service" in f.read()
+            return f"/{_service_unit()}.service" in f.read()
     except OSError:
         return False
 
@@ -3382,7 +3546,7 @@ def _stop_daemon_pid(pid) -> None:
     if _is_systemd_managed(pid):
         try:
             import subprocess as _sp
-            _sp.run(["systemctl", "--user", "stop", "duckdice"], check=False, timeout=10)
+            _sp.run(["systemctl", "--user", "stop", _service_unit()], check=False, timeout=10)
             return
         except Exception:
             pass
@@ -3686,6 +3850,67 @@ def cmd_monitor():
 # ══════════════════════════════════════════════════════════
 #  --status COMMAND
 # ══════════════════════════════════════════════════════════
+def _read_lane_states() -> list:
+    """v1.10.0 (WolfBet v2.35.0) — [(lane, state-dict | None, alive)] for lanes
+    1..LANES_MAX that have a state file."""
+    out = []
+    for k in range(1, LANES_MAX + 1):
+        path = lane_path(_BASE_STATE_PATH, k)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path) as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            out.append((k, None, False))
+            continue
+        alive = False
+        try:
+            if d.get("pid"):
+                os.kill(int(d["pid"]), 0)
+                alive = True
+        except (OSError, ValueError, TypeError):
+            pass
+        out.append((k, d, alive))
+    return out
+
+
+def cmd_lanes_status():
+    """v1.10.0 (WolfBet v2.35.0) — one row per lane + totals. No Pace column:
+    DuckDice sends no rate-limit quota headers (no soft pacing)."""
+    rows = _read_lane_states()
+    if not rows:
+        console.print("[yellow]No lane state files found.[/]")
+        return
+    t = Table(title="Parallel lanes", title_style="bold cyan", box=box.SIMPLE)
+    for col in ("Lane", "State", "Session", "Uptime", "Run", "Profit", "Equity", "bps"):
+        t.add_column(col, justify="left" if col == "State" else "right")
+    tot_bps = tot_profit = 0.0
+    for k, d, alive in rows:
+        if d is None:
+            t.add_row(str(k), "[red]unreadable[/]", *["-"] * 6)
+            continue
+        p = float(d.get("profit", 0) or 0)
+        bps = float(d.get("bets_per_second", 0) or 0) if alive else 0.0
+        eq = d.get("lane_equity")
+        tot_profit += p
+        tot_bps += bps
+        st = "[green]LIVE[/]" if alive else "[red]STOPPED[/]"
+        if alive and int(d.get("pause_remaining_sec", 0) or 0) > 0:
+            st = "[cyan]PAUSED[/]"
+        run = d.get("run_uptime_sec")
+        t.add_row(str(k), st, f"#{d.get('session_id', '?')}",
+                  str(timedelta(seconds=int(d.get("uptime_sec", 0) or 0))),
+                  fmt_duration(run) if run is not None else "-",
+                  f"[{'green' if p >= 0 else 'red'}]{p:+.8f}[/]",
+                  f"{eq:.8f}" if isinstance(eq, (int, float)) else "-",
+                  f"{bps:.1f}")
+    console.print(t)
+    console.print(f"  [dim]Total:[/] [bold]{tot_bps:.1f}[/] bps   "
+                  f"[dim]session P/L[/] [{'green' if tot_profit >= 0 else 'red'}]{tot_profit:+.8f}[/]   "
+                  f"[dim]lanes live[/] {sum(1 for _, _, a in rows if a)}/{len(rows)}")
+
+
 def cmd_status():
     if not os.path.exists(STATE_PATH):
         console.print("[yellow]No running session found.[/]")
@@ -4553,6 +4778,16 @@ def cmd_config_show():
                       f"[dim]mode={oct(st.st_mode & 0o777)}  size={st.st_size}B[/]")
     except OSError:
         pass
+    # v1.10.0 (WolfBet v2.35.0 / v2.36.0) — lane count, split mode, overrides.
+    raw = _read_config_raw() or {}
+    n_lanes, mode = lanes_count(raw), lane_split(raw)
+    console.print(f"\n[dim]Lanes:[/] [bold]{n_lanes}[/]  [dim]split:[/] [bold]{mode}[/]"
+                  + (f"  [dim]({LANE_SPLIT_HELP[mode]})[/]" if n_lanes > 1 else ""))
+    for lane in range(2, LANES_MAX + 1):
+        ov = lane_overrides(raw, lane, _LANE_FORBIDDEN_KEYS)
+        if ov:
+            parts = ", ".join(f"{k}={_fmt_config_value(k, v)}" for k, v in sorted(ov.items()))
+            console.print(f"  [magenta]lane{lane}[/] overrides: {parts}")
     console.print("[dim]Tweak with:[/] [cyan]python3 duckdice.py --config-set KEY=VALUE …[/]")
 
 
@@ -4583,6 +4818,19 @@ def cmd_config_set(pairs: list):
             console.print("[dim]  Set the DUCKDICE_API_KEY environment variable instead "
                           "(never in shell history / process args).[/]")
             sys.exit(2)
+    # v1.10.0 (WolfBet v2.35.0 / v2.36.0) — lanes=N, lane_split=MODE and
+    # laneK.key=value write the lanes block directly.
+    try:
+        pairs, per_lane, count, split = split_lane_pairs(pairs)
+    except ValueError as e:
+        console.print(f"[red]Invalid --config-set argument:[/] {e}")
+        sys.exit(2)
+    if per_lane or count is not None or split is not None:
+        rc = _cmd_config_set_lanes(per_lane, count, split)
+        if rc:
+            sys.exit(rc)
+        if not pairs:
+            return
     try:
         parsed = _parse_config_set_pairs(pairs)
     except ValueError as e:
@@ -4621,11 +4869,21 @@ def cmd_config_set(pairs: list):
     if unsafe:
         console.print(f"[yellow]Note:[/] {len(unsafe)} field(s) need a full restart to apply — "
                       f"{', '.join(sorted(unsafe))}. Run [cyan]duckctl restart[/] when ready.")
+    _signal_base_daemon()
+    # v1.10.0 (WolfBet v2.35.0) — the base config is shared: reload lanes 2..N too.
+    n_lanes = _signal_lane_daemons(range(2, LANES_MAX + 1))
+    if n_lanes:
+        console.print(f"[dim]{n_lanes} more lane(s) reloaded live config.[/]")
+
+
+def _signal_base_daemon() -> None:
+    """SIGHUP the lane-1 daemon (classic pid file) and say what happened."""
+    pid_path = _BASE_PID_PATH
     try:
-        if not os.path.exists(PID_PATH):
+        if not os.path.exists(pid_path):
             console.print("[dim]Daemon not running; changes apply on next [cyan]duckctl start[/].[/]")
             return
-        with open(PID_PATH) as f:
+        with open(pid_path) as f:
             daemon_pid = int(f.read().strip())
         if not hasattr(signal, "SIGHUP"):
             console.print("[dim]SIGHUP not supported on this platform; restart the daemon to apply.[/]")
@@ -4634,6 +4892,120 @@ def cmd_config_set(pairs: list):
         console.print("[dim]Daemon reloaded live config.[/]")
     except (OSError, ValueError):
         console.print("[dim]Daemon PID stale; changes apply on next [cyan]duckctl start[/].[/]")
+
+
+def _encode_config_value(k, v):
+    if k in _STREAK_TUPLE_KEYS:
+        return _encode_streak_tuple(v)
+    return v
+
+
+def _lane_override_changes(lane_pairs: list):
+    """v1.10.0 (WolfBet v2.35.0) — validate laneK.* pairs through the normal
+    mutation path. Returns (sets, removals): sets = {key: encoded value},
+    including derived fields (bet_value after multiplier); removals = keys
+    whose override goes away (value default / unset / inherit)."""
+    removals, to_set = set(), []
+    for pair in lane_pairs:
+        k, v = pair.split("=", 1)
+        canon = _TWEAK_ALIAS.get(k.strip().lower(), k.strip().lower())
+        check_lane_keys([canon], _LANE_FORBIDDEN_KEYS)
+        if v.strip().lower() in LANE_UNSET_VALUES:
+            removals.add(canon)
+        else:
+            to_set.append(pair)
+    parsed = _parse_config_set_pairs(to_set) if to_set else {}
+    check_lane_keys(parsed, _LANE_FORBIDDEN_KEYS)
+    if not load_config():
+        raise ValueError("No config saved yet — run the wizard first.")
+    keys = list(_CONFIG_KEYS) + list(_STREAK_TUPLE_KEYS)
+    before = {k: getattr(state, k, None) for k in keys}
+    _apply_mutation(parsed)
+    changes = {k: _encode_config_value(k, getattr(state, k, None))
+               for k in keys if getattr(state, k, None) != before[k]}
+    for k in parsed:   # same value as base still pins the override
+        changes.setdefault(k, _encode_config_value(k, getattr(state, k, None)))
+    check_lane_keys(changes, _LANE_FORBIDDEN_KEYS)
+    return changes, removals
+
+
+def _signal_lane_daemons(lanes=None) -> int:
+    """SIGHUP every running lane daemon (or just `lanes`). Returns count signalled."""
+    if not hasattr(signal, "SIGHUP"):
+        return 0
+    n = 0
+    for k in (lanes or range(1, LANES_MAX + 1)):
+        try:
+            with open(lane_path(_BASE_PID_PATH, k)) as f:
+                os.kill(int(f.read().strip()), signal.SIGHUP)
+            n += 1
+        except (OSError, ValueError):
+            continue
+    return n
+
+
+def _cmd_config_set_lanes(per_lane: dict, count, split=None) -> int:
+    """Write lanes.count / lanes.split / lanes.overrides[K]; SIGHUP touched lanes.
+    Nothing is written when any part is refused."""
+    raw = _read_config_raw()
+    if raw is None:
+        console.print("[yellow]No config saved yet — run the wizard first.[/]")
+        return 1
+    # v1.10.0 (L7) — the faucet balance can't be split between lanes.
+    refusal = _faucet_lanes_conflict(count if count is not None else lanes_count(raw),
+                                     raw.get("faucet"))
+    if refusal and count is not None:
+        console.print(f"[red]Refusing lanes={count}:[/] {refusal}")
+        return 2
+    lanes = raw.get("lanes") if isinstance(raw.get("lanes"), dict) else {}
+    overrides = lanes.get("overrides") if isinstance(lanes.get("overrides"), dict) else {}
+    lines, new_ov = [], {}
+    for lane, lane_pairs in sorted(per_lane.items()):
+        try:
+            sets, removals = _lane_override_changes(lane_pairs)
+        except ValueError as e:
+            console.print(f"[red]Invalid lane{lane} override:[/] {e}")
+            return 2
+        ov = dict(overrides.get(str(lane)) or {})
+        for k in sorted(removals):
+            ov.pop(k, None)
+            lines.append(f"  [yellow]lane{lane}.{k}[/]: [dim]override removed (uses base)[/]")
+        for k, v in sets.items():
+            ov[k] = v
+            shown = parse_streak_delay(v) if k in _STREAK_TUPLE_KEYS else v
+            lines.append(f"  [yellow]lane{lane}.{k}[/]  →  [green]{_fmt_config_value(k, shown)}[/]")
+        new_ov[str(lane)] = ov
+    console.print(Rule("[bold cyan]Lane config updated[/]"))
+    raw["lanes"] = lanes
+    lanes["overrides"] = overrides
+    if count is not None:
+        console.print(f"  [yellow]lanes[/]: [dim]{lanes.get('count', 1)}[/]  →  [green]{count}[/]")
+        lanes["count"] = count
+    if split is not None:
+        console.print(f"  [yellow]lane_split[/]: [dim]{lane_split(raw)}[/]  →  [green]{split}[/]  "
+                      f"[dim]({LANE_SPLIT_HELP[split]})[/]")
+        lanes["split"] = split
+    for line in lines:
+        console.print(line)
+    for lane, ov in new_ov.items():
+        if ov:
+            overrides[lane] = ov
+        else:
+            overrides.pop(lane, None)
+    _write_config_raw(raw)
+    console.print(f"\n[dim]Saved to[/] [cyan]{CONFIG_PATH}[/]")
+    if per_lane:
+        n = _signal_lane_daemons(sorted(per_lane))
+        if n:
+            console.print(f"[dim]{n} running lane(s) reloaded live config "
+                          "(restart-only fields apply on the next start).[/]")
+    if count is not None:
+        console.print(f"[dim]Start lanes 2..{count} with [cyan]python3 duckdice.py --daemon --lane K[/] "
+                      "(restart running lanes so each recomputes its budget share).[/]")
+    elif split is not None:
+        console.print("[dim]lane_split applies on the next lane start — run "
+                      "[cyan]duckctl restart[/].[/]")
+    return 0
 
 
 # ══════════════════════════════════════════════════════════
@@ -4685,17 +5057,87 @@ def _startup_purge():
 # ══════════════════════════════════════════════════════════
 #  --benchmark / --diagnose  (v1.9.0 — WolfBet v2.26.1)
 # ══════════════════════════════════════════════════════════
-def cmd_benchmark(n=None):
+def _bench_client_session():
+    """A separate HTTP session per benchmark client (like separate lane
+    processes), with the live session's proxy."""
+    sess = requests.Session()
+    sess.proxies.update(getattr(_http_session, "proxies", {}) or {})
+    return sess
+
+
+def _bench_lanes(n: int, lanes: int) -> dict:
+    """v1.10.0 (WolfBet v2.35.0) — `lanes` concurrent clients each fire `n`
+    read-only GET /bot/stats/{SYMBOL}. Returns {"rps", "p50", "ok", "total", "s429"}."""
+    url = _stats_url()
+    lock = threading.Lock()
+    out = {"samples": [], "ok": 0, "s429": 0}
+
+    def _client():
+        sess = _bench_client_session()
+        for _ in range(n):
+            t0 = time.time()
+            try:
+                r = sess.get(url, headers=_headers(), timeout=15)
+            except Exception as e:
+                logger.debug("lane benchmark request failed: %s", e)
+                continue
+            ms = (time.time() - t0) * 1000
+            with lock:
+                out["samples"].append(ms)
+                out["ok"] += r.status_code == 200
+                out["s429"] += r.status_code == 429
+
+    t_start = time.time()
+    threads = [threading.Thread(target=_client) for _ in range(lanes)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    wall = max(1e-6, time.time() - t_start)
+    samples = sorted(out["samples"])
+    return {"rps": out["ok"] / wall, "p50": percentile(samples, 0.50) if samples else 0.0,
+            "ok": out["ok"], "total": n * lanes, "s429": out["s429"]}
+
+
+def cmd_benchmark_lanes(n: int, lanes: int):
+    """v1.10.0 (WolfBet v2.35.0) — probe 1..N concurrent clients and recommend
+    a lane count (read-only, no bets)."""
+    lanes = max(2, min(LANES_MAX, int(lanes)))
+    console.print(f"[dim]Lane benchmark: 1..{lanes} concurrent clients × {n} × "
+                  f"GET /bot/stats/{state.currency.upper()}?api_key={_mask_key(state.api_key)} "
+                  f"(read-only, no bets, proxy={mask_proxy(state.proxy)}) …[/]")
+    rows = {k: _bench_lanes(n, k) for k in range(1, lanes + 1)}
+    tbl = Table(title="Concurrent clients", title_style="bold cyan")
+    for col in ("lanes", "req/s", "×1 lane", "p50 ms", "ok", "429"):
+        tbl.add_column(col, justify="right")
+    base = rows[1]["rps"] or 1e-6
+    for k, r in rows.items():
+        tbl.add_row(str(k), f"{r['rps']:.1f}", f"{r['rps'] / base:.2f}×", f"{r['p50']:.0f}",
+                    f"{r['ok']}/{r['total']}", str(r["s429"]))
+    console.print(tbl)
+    rec = recommend_lanes(rows[1]["rps"], {k: v for k, v in rows.items() if k > 1})
+    console.print(f"\n[bold]Recommended lanes:[/] [bold magenta]{rec}[/]  "
+                  "[dim](more lanes stop adding speed or start getting throttled)[/]")
+    console.print("[dim]Read-only endpoint; the bet endpoint may be throttled differently. "
+                  "Confirm live: --config-set lanes=N, start the lanes, then compare "
+                  "total bps in --lanes-status.[/]")
+    return rec
+
+
+def cmd_benchmark(n=None, lanes=None):
     """Fire N read-only balance requests through the live session; report latency.
 
     GET /bot/stats/{SYMBOL}: no bet, no DB write, no session. The key is
-    masked in the output.
+    masked in the output. `lanes` > 1 runs the concurrent-client benchmark.
     """
     n = 20 if n is None else int(n)
     n = max(3, min(200, n))
     if not load_config():
         console.print("[red]No config saved yet — run the wizard first.[/]")
         sys.exit(1)
+    if lanes and int(lanes) > 1:
+        cmd_benchmark_lanes(n, lanes)
+        return
     url = _stats_url()
     console.print(f"[dim]Benchmarking {n} × GET /bot/stats/{state.currency.upper()}"
                   f"?api_key={_mask_key(state.api_key)} (proxy={mask_proxy(state.proxy)}) …[/]")
@@ -4870,6 +5312,11 @@ def main():
             "  python3 duckdice.py --benchmark 20        # read-only API latency probe\n"
             "  python3 duckdice.py --diagnose            # bottleneck of the running daemon\n"
             "  python3 duckdice.py --cleanup 7           # purge bet rows older than 7 days\n"
+            "  python3 duckdice.py --config-set lanes=3 lane_split=budget   # parallel lanes\n"
+            "  python3 duckdice.py --config-set lane2.maxloss=1 lane3.mult=3\n"
+            "  python3 duckdice.py --daemon --lane 2     # run lane 2\n"
+            "  python3 duckdice.py --lanes-status\n"
+            "  python3 duckdice.py --benchmark 20 --lanes 4   # concurrent read-only probe\n"
         ),
     )
     parser.add_argument("--version", action="version", version=f"DuckDice AutoBot v{VERSION}")
@@ -4895,6 +5342,8 @@ def main():
                        help="Bottleneck analysis of the running daemon session")
     group.add_argument("--cleanup", nargs="?", type=int, const=-1, metavar="DAYS",
                        help="Purge bet rows of sessions older than DAYS (default purge_days)")
+    group.add_argument("--lanes-status", action="store_true",
+                       help="Show one row per parallel lane + totals")
     # modifiers, not commands: must combine WITH --stats, so they live on the
     # standalone parser, NOT the mutually-exclusive command group.
     parser.add_argument("--since", metavar="DATE",
@@ -4902,7 +5351,10 @@ def main():
     parser.add_argument("--until", metavar="DATE",
                         help="With --stats/--analytics: window end (bare date = inclusive end of day)")
     parser.add_argument("--lane", type=int, metavar="K", default=None,
-                        help="With --stats/--analytics: only that lane's sessions")
+                        help=f"Parallel lane to run / inspect (1-{LANES_MAX}; default 1). "
+                             "With --stats/--analytics: only that lane's sessions")
+    parser.add_argument("--lanes", type=int, metavar="N", default=None,
+                        help="With --benchmark: probe 1..N concurrent clients, recommend a lane count")
     parser.add_argument("--preset", type=str, metavar="NAME",
                         help="Load a named preset and start (skips wizard)")
     parser.add_argument("--verbose", action="store_true",
@@ -4918,7 +5370,19 @@ def main():
     if args.daemon:
         args.resume = True
 
+    # v1.10.0 (WolfBet v2.35.0) — lane identity first: every command below
+    # (status, monitor, stop, diagnose, the daemon itself) then reads / writes
+    # this lane's state + pid files.
+    try:
+        _apply_lane(args.lane)
+    except ValueError as e:
+        console.print(f"[red]{e}[/]")
+        sys.exit(2)
+
     # ── Quick commands (no DB/state needed) ───────────────
+    if args.lanes_status:
+        cmd_lanes_status()
+        return
     if args.status:
         cmd_status()
         return
@@ -4947,7 +5411,7 @@ def main():
         cmd_config_set(args.config_set)
         return
     if args.benchmark is not None:
-        cmd_benchmark(args.benchmark)
+        cmd_benchmark(args.benchmark, lanes=args.lanes)
         return
     if args.diagnose:
         cmd_diagnose()
@@ -5012,6 +5476,23 @@ def main():
         setup_wizard()
 
     _startup_purge()   # v1.9.0 — WolfBet v2.26.0 retention
+
+    # v1.10.0 (L7) — faucet can't run with parallel lanes. The saved lanes
+    # block counts on every start path (a --preset run loads no config).
+    raw_cfg = _read_config_raw()
+    if raw_cfg is not None:
+        state.lanes_count = lanes_count(raw_cfg)
+        state.lane_split = lane_split(raw_cfg)
+    refusal = _faucet_lanes_conflict(state.lanes_count, state.faucet)
+    if refusal:
+        console.print(f"[red]{refusal}[/]")
+        logger.error("START REFUSED: %s", refusal)
+        sys.exit(2)
+
+    # v1.10.0 (WolfBet v2.35.0) — split budget; lane K>1 staggers its first bet.
+    _init_lane_budget()
+    if state.lane > 1:
+        time.sleep((state.lane - 1) * 2.0)
 
     state.session_id    = _db_start_session()
     state.session_start = time.time()

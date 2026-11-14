@@ -232,7 +232,17 @@ python3 duckdice.py --analytics --since 2026-11-01 --lane 2  # Windowed, one lan
 python3 duckdice.py --last-bets N     # Last N bets across sessions
 python3 duckdice.py --session-bets N  # Full stats + streaks for session N
 python3 duckdice.py --verbose         # Enable DEBUG logging
+
+# Parallel lanes (v1.10.0): N bot processes on one account, config and DB
+python3 duckdice.py --config-set lanes=3 lane_split=budget  # count + money split
+python3 duckdice.py --config-set lane2.maxloss=1 lane3.mult=3  # per-lane overrides
+python3 duckdice.py --daemon --lane 2 # Run lane 2 (lane 1 = classic paths)
+python3 duckdice.py --status --lane 2 # --status / --monitor / --stop per lane
+python3 duckdice.py --lanes-status    # One row per lane + total bps / P/L
+python3 duckdice.py --benchmark 20 --lanes 4  # Read-only probe at 1..4 clients
 ```
+
+Faucet mode can't run with lanes > 1 (the faucet balance can't be split): `--config-set lanes=N` and the start refuse it.
 
 ---
 
