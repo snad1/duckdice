@@ -53,7 +53,7 @@ def test_cli_version():
 
 
 def test_tg_version():
-    assert tg.VERSION == "1.8.1"
+    assert tg.VERSION == "1.9.0"
 
 
 # ── PRAGMAs ───────────────────────────────────────────────
@@ -322,10 +322,10 @@ def test_since_until_are_modifiers_not_commands():
 def test_tg_analytics_parses_args_and_threads_where():
     src = inspect.getsource(tg_handlers.cmd_analytics)
     assert "context.args" in src
-    assert "started_at >= ?" in src and "started_at <= ?" in src
+    # v1.9.0: the window clause comes from shared.core.stats (E2-S5).
+    assert "stats_date_window(since, until)" in src
     assert src.count("{where}") >= 5
-    assert "T23:59:59" in src
-    assert "Range" in src and "window_label" in src
+    assert "'Range' if window_label else 'Lifetime'" in src
 
 
 def test_tg_analytics_usage_hint_on_three_args():

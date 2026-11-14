@@ -131,5 +131,5 @@ def test_tg_recovers_from_429_and_timeout(fake_casino, tg_engine_factory, run_tg
     assert not fake_casino.exhausted
     assert (e.total_bets, e.wins, e.losses) == (10, 6, 4)
     assert fake_casino.bet_posts == 12
-    assert sleeps.count(2.0) == 2               # error backoff after the 429 and the timeout
-    assert sleeps.count(0.25) == 8              # fixed 2 s rate-limit wait (E2-S5 changes this)
+    assert sleeps.count(2.0) == 1               # error backoff after the timeout only
+    assert sleeps.count(0.25) == 4              # first 429 waits 2^0 = 1 s in 0.25 s slices (E2-S5)

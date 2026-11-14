@@ -1,5 +1,21 @@
 # Changelog
 
+## TG v1.9.0 — Streak reset, delay caps, analytics window, 429 backoff (2026-11-14)
+
+Mirrors WolfBet TG 1.20.0: v2.30.6 (delay cap), v2.32.0 (streak reset), v2.32.1 (insufficient balance terminal), v2.33.0 (time-of-day window). CLI unchanged. DuckDice API calls unchanged.
+
+- **Streak reset** — `/set srloss N` (alias `streakreset`, `off` to disable) stops the session on the first win after N+ consecutive losses, only while profit ≥ 0. The bot then starts a new session (new `sessions` row) after `/set srdelay S` (alias `streakresetdelay`, default 600 s, 5–86400), **even when `recurring` is off**. Live `/set srloss|srdelay` carries into the next cycle; the bumped `base_bet` is kept, `next_profit_milestone` re-arms from `profit_threshold`, and faucet mode is kept. Uses `shared.core.session_rules` (`record_outcome`, `streak_reset_triggered`, `STREAK_RESET_REASON`).
+- **Delay caps** — `/set recdelay` and `/set srdelay` clamp to 5..86400 and tell you when they clamp. A saved `recurring_delay` above 24 h is capped at the restart.
+- **`/tweak`** gains `srloss` (live on the running engine) and `srdelay` / `recdelay` (saved; apply at the next stop).
+- **`/config`, `/status`, stop message** show `Streak reset … / SR nL→Ss` when set; `/help` lists the keys; web settings page lists `streak_reset_losses` / `streak_reset_delay`; both keys are in `CONFIG_KEYS` (presets) and the `/resume` snapshot.
+- **`/analytics`** builds its window with `shared.core.stats.stats_date_window`: `/analytics 2026-11-13 14:00` now starts at 14:00 instead of matching the whole day (`' ' < 'T'`). A time token after a date joins it, since Telegram splits on spaces. Bad bounds print the usage.
+- **Fix: 429 backoff.** A 429 waited a fixed 2 s (plus the generic error backoff) and never escalated. It now waits `Retry-After` if sent, else 1, 2, 4 … s capped at 30 s, and stops with `Rate limit persisted >30min — giving up` after 1800 s of cumulative waiting (same as cryptogames TG). The wait checks `/stop` every 0.25 s; a placed bet resets the counters.
+- **Fix: insufficient-balance match.** The generic exception path stopped the session on any error containing "balance". It now matches "insufficient" only. Insufficient balance stays terminal: no recurring or streak-reset restart.
+- N/A for TG: none of the v2.32.0–v2.33.0 TG items depend on WolfBet-only API features.
+- Tests: `tests/test_wolfbet_sync_e2.py` (35); fake gains `api_error_balance` and a `retry_after` header. `test_portability_v1.py` version pin and `/analytics` source check, and the E0 429 sleep counts, updated.
+
+`tg/__init__.py` `1.8.1` → `1.9.0`.
+
 ## CLI v1.6.1 / TG v1.8.1 — casino-shared over HTTPS (2026-11-13)
 
 Mirrors wolfbet v2.16.11 (casino-shared dependency installs over HTTPS). No bot behaviour change.
