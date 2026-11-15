@@ -45,7 +45,7 @@ from shared.core.stats import stats_date_window, fmt_duration, sessions_time_spa
 from shared.core.lanes import (
     LANES_MAX, LANE_UNSET_VALUES, LANE_SPLIT_HELP,
     lane_path, validate_lane, lanes_count, lane_split, lane_config,
-    lane_overrides, split_budget_on, split_bet_divisor, split_lane_pairs,
+    lane_overrides, split_budget_on, split_base_bet, split_lane_pairs,
     check_lane_keys, lane_share, lane_equity, lane_budget_exceeded,
     recommend_lanes,
 )
@@ -73,7 +73,7 @@ STATE_PATH   = os.environ.get("DUCKDICE_STATE_PATH",   os.path.expanduser("~/.du
 PID_PATH     = os.environ.get("DUCKDICE_PID_PATH",     os.path.expanduser("~/.duckdice_autobot.pid"))
 PRESET_PATH  = os.environ.get("DUCKDICE_PRESET_PATH",  os.path.expanduser("~/.duckdice_presets.json"))
 LOG_DIR      = os.environ.get("DUCKDICE_LOG_DIR",      os.path.expanduser("~/.duckdice_logs"))
-VERSION      = "1.10.0"
+VERSION      = "1.11.0"
 APP_ENV      = os.environ.get("APP_ENV", "production")
 
 # ── Daily rotating logger ──
@@ -313,7 +313,9 @@ def _apply_lane_config(data: dict) -> None:
     lane's overrides + bet split on top of the base values already applied."""
     state.lanes_count = lanes_count(data)
     state.lane_split = lane_split(data)
-    merged, warning = lane_config(data, state.lane, _LANE_FORBIDDEN_KEYS)
+    # v1.11.0 (WolfBet v2.36.0) — a split bet below the learned 422 minimum
+    # stays full (0 until a 422 is seen: no minimum known).
+    merged, warning = lane_config(data, state.lane, _LANE_FORBIDDEN_KEYS, state.min_bet)
     if warning:
         logger.warning(warning)
     state.base_bet_disk = data.get("base_bet")
@@ -383,7 +385,7 @@ def _reload_live_config() -> dict:
         logger.warning("live reload: failed to parse config: %s", e)
         return {}
     # v1.10.0 (WolfBet v2.35.0 / v2.36.0) — this lane's overrides + bet split.
-    data = lane_config(data, state.lane, _LANE_FORBIDDEN_KEYS)[0]
+    data = lane_config(data, state.lane, _LANE_FORBIDDEN_KEYS, state.min_bet)[0]
     applied, skipped = {}, []
     tuple_keys = set(_STREAK_TUPLE_KEYS)
     with state.lock:
@@ -1349,9 +1351,14 @@ def _apply_basebet_pct() -> bool:
     if state.basebet_pct <= 0 or state.current_balance <= 0:
         return False
     # v1.10.0 (WolfBet v2.36.0) — bet split divides by the lane count.
-    new_base = max(state.min_bet, round(state.current_balance * state.basebet_pct
-                                        / split_bet_divisor(state.lanes_count,
-                                                            state.lane_split), 8))
+    # v1.11.0 — a split bet that rounds to 0 or is below the learned minimum
+    # stays full; an unsplit bet below it is still floored to it.
+    new_base, note = split_base_bet(
+        round(state.current_balance * state.basebet_pct, 8),
+        state.lanes_count, state.lane_split, False, state.min_bet)
+    if note:
+        logger.warning(note)
+    new_base = max(state.min_bet, new_base)
     if new_base <= 0 or abs(new_base - state.base_bet) < 1e-12:
         return False
     with state.lock:

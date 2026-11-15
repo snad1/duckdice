@@ -353,9 +353,9 @@ def test_split_basebet_pct_divided(cli_state):
     s = cli_state(basebet_pct=0.01, current_balance=10.0, lanes_count=4, lane_split="bet")
     assert dd._apply_basebet_pct()
     assert s.base_bet == pytest.approx(0.025)
-    s.min_bet = 0.05                        # a learned casino minimum still floors it
+    s.min_bet = 0.05                        # v1.11.0: split below a learned minimum stays full
     assert dd._apply_basebet_pct()
-    assert s.base_bet == pytest.approx(0.05)
+    assert s.base_bet == pytest.approx(0.1)
 
 
 def test_split_live_reload_no_spurious_base_bet_warning(saved_config, caplog):
