@@ -1,5 +1,16 @@
 # Changelog
 
+## CLI v1.11.0 — Lane split minimum bet (2026-11-15)
+
+Completes WolfBet CLI v2.36.0 (`lane_split`, `6174b96`) with the duckdice adapt from backlog Epic 9 (E9-S6). The rest of v2.36.0 shipped in 1.10.0. Replays goated CLI v1.11.0 (E9-S2). TG unchanged.
+
+- **Minimum bet** — DuckDice has no fixed minimum: the CLI learns it per lane from a 422 "minimum bet" reply (`state.min_bet`). In `bet` / `both`, a split `base_bet` or `basebet_pct` bet below that learned minimum now stays full, with a warning in the log. Before, a split `basebet_pct` bet was divided and then raised to the minimum. Same on load and on SIGHUP reload; an untouched full bet is still saved as is. A lane's own `base_bet` override is never divided. Until a 422 is seen there is no minimum, so the split divides as in 1.10.0 (a split that rounds to 0 still stays full). An unsplit `basebet_pct` bet below the learned minimum is still raised to it. Uses `lane_config(..., min_bet)` and `split_base_bet` from casino-shared 0.3.0.
+- **No default change** — duckdice 1.10.0 already shipped `lane_split=none` as the default, so lanes never had the always-on v2.35.0 budget guard here. The budget stop applies only with `lane_split=budget` or `both`, as before.
+- N/A: nothing new.
+- Tests: `tests/test_wolfbet_sync_e9.py` (14). `test_wolfbet_sync_e5_lanes.py::test_split_basebet_pct_divided` now expects the full bet below a learned minimum; `test_portability_v1.py` pins 1.11.0.
+
+`VERSION` `1.10.0` → `1.11.0`.
+
 ## CLI v1.10.0 — Parallel lanes (2026-11-14)
 
 Mirrors WolfBet CLI v2.35.0 (parallel lanes) and v2.36.0 (`lane_split`); where the two differ, v2.36.0 code wins. Lane helpers come from `shared.core.lanes` (casino-shared E1-S5). Replays goated CLI v1.10.0 (E5-S6). TG unchanged.
