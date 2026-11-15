@@ -1,4 +1,4 @@
-"""E2-S5 — duckdice TG parity with WolfBet TG 1.20.0.
+"""Duckdice TG parity with WolfBet TG 1.20.0.
 
 Streak reset (v2.32.0), delay caps (v2.30.6), insufficient balance stays
 terminal (v2.32.1), /analytics window fix (v2.33.0), recurring milestone
@@ -194,7 +194,7 @@ def test_429_gives_up_after_1800s(fake_casino, tg_engine_factory, run_tg, rate_w
 
     assert rate_waits == [600.0, 600.0, 600.0]         # 4th 429: 1800 s already waited
     assert e.total_bets == 0
-    assert e.stop_reason == "Rate limit persisted >30min — giving up"
+    assert e.stop_reason == "Rate limit persisted >30min: giving up"
 
 
 def test_wait_running_returns_on_stop(tg_engine_factory, sleeps):

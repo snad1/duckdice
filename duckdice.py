@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════╗
-║   DuckDice AutoBot v1.0  — Live Dashboard               ║
+║   DuckDice AutoBot v1.0 : Live Dashboard               ║
 ║   Auto-betting engine with live TUI & session logging   ║
 ╚══════════════════════════════════════════════════════════╝
 """
@@ -12,6 +12,7 @@ from collections import deque
 from typing import Optional, List
 from logging.handlers import TimedRotatingFileHandler
 
+from shared.core.validation import InvalidNumber, finite_float
 from shared.core.session_rules import (
     RECURRING_DELAY_MAX, clamp, parse_streak_delay, record_outcome,
     restart_delay_for, should_restart, streak_delay_for, streak_reset_stop_reason,
@@ -20,10 +21,11 @@ from shared.core.session_rules import (
 from shared.core.database import cleanup_old_bets, cleanup_live_bets
 from shared.core.diagnostics import percentile, benchmark_verdict
 from shared.core.net import validate_proxy, mask_proxy
+from shared.core.validation import finite_float
 try:
     import readline  # enables arrow keys, history, and line editing in input()
 except ImportError:
-    pass  # fallback — input() still works, just no line editing
+    pass  # fallback: input() still works, just no line editing
 
 try:
     import requests
@@ -80,7 +82,7 @@ PID_PATH     = os.environ.get("DUCKDICE_PID_PATH",     os.path.expanduser("~/.du
 PRESET_PATH  = os.environ.get("DUCKDICE_PRESET_PATH",  os.path.expanduser("~/.duckdice_presets.json"))
 RUN_PATH     = os.environ.get("DUCKDICE_RUN_PATH",     os.path.expanduser("~/.duckdice_run.json"))
 LOG_DIR      = os.environ.get("DUCKDICE_LOG_DIR",      os.path.expanduser("~/.duckdice_logs"))
-VERSION      = "1.12.0"
+VERSION      = "1.12.1"
 APP_ENV      = os.environ.get("APP_ENV", "production")
 
 # ── Daily rotating logger ──
@@ -94,7 +96,7 @@ _log_handler = TimedRotatingFileHandler(
 )
 _log_handler.suffix = "%Y-%m-%d"
 class _RedactingFormatter(logging.Formatter):
-    """v1.9.0 — the API key sits in every request URL, so an exception text or
+    """v1.9.0: the API key sits in every request URL, so an exception text or
     traceback can carry it. Mask it in every formatted log line."""
 
     def format(self, record):
@@ -107,7 +109,7 @@ _log_handler.setFormatter(_RedactingFormatter(
 logger.addHandler(_log_handler)
 
 # ══════════════════════════════════════════════════════════
-#  PARALLEL LANES  (v1.10.0 — WolfBet v2.35.0 / v2.36.0)
+#  PARALLEL LANES  (v1.10.0: WolfBet v2.35.0 / v2.36.0)
 # ══════════════════════════════════════════════════════════
 # A lane is one bot process with its own session, chain, counters, stops and
 # pauses. Lane 1 keeps the classic paths; lanes 2..N run side by side on the
@@ -125,7 +127,7 @@ _FAUCET_LANES_MSG = ("Faucet mode can't run with parallel lanes: the faucet bala
 
 
 def _faucet_lanes_conflict(count: int, faucet) -> Optional[str]:
-    """v1.10.0 — the refusal message when lanes > 1 meets faucet mode, else None."""
+    """v1.10.0: the refusal message when lanes > 1 meets faucet mode, else None."""
     return _FAUCET_LANES_MSG if count > 1 and bool(faucet) else None
 
 
@@ -160,11 +162,11 @@ _CONFIG_KEYS = [
     "bet_delay", "max_profit", "max_loss", "max_bets", "max_wins",
     "stop_on_balance", "custom_rules_text", "delay_martin_threshold",
     "profit_increment", "profit_threshold", "profit_increment_scope", "faucet",
-    # v1.7.0 — WolfBet v2.16.0 / v2.25.3 / v2.28.2 / v2.32.0 session keys.
+    # v1.7.0: WolfBet v2.16.0 / v2.25.3 / v2.28.2 / v2.32.0 session keys.
     "recurring", "recurring_delay", "basebet_pct",
     "milestone_bets", "milestone_wins", "milestone_losses", "milestone_profit",
     "streak_reset_losses", "streak_reset_delay",
-    # v1.9.0 — WolfBet v2.26.0 / v2.27.0 tooling keys.
+    # v1.9.0: WolfBet v2.26.0 / v2.27.0 tooling keys.
     "proxy", "purge_days", "db_write_mode",
 ]
 
@@ -244,7 +246,30 @@ def _mask_key(key: str) -> str:
     """Mask API key for safe logging: show first 8 + last 4 chars."""
     if not key or len(key) < 16:
         return "***"
-    return f"{key[:8]}…{key[-4:]}"
+    return f"{key[:8]}...{key[-4:]}"
+
+
+MIN_BET_MAX_MULTIPLE = 10.0
+MIN_BET_MAX_BALANCE_FRACTION = 0.25
+
+
+def _bounded_min_bet(value, base_bet: float, balance: float) -> float | None:
+    """Accept a server-advertised minimum only when it is finite and bounded.
+
+    The ceiling is the larger of 10x the configured base bet and a quarter of the
+    balance, so a tampered or misparsed 422 cannot raise the stake without limit.
+    """
+    try:
+        amount = finite_float("minimum bet", value, minimum=0)
+    except InvalidNumber:
+        return None
+    if amount <= 0:
+        return None
+    if base_bet > 0 and amount > base_bet * MIN_BET_MAX_MULTIPLE:
+        return None
+    if balance > 0 and amount > balance * MIN_BET_MAX_BALANCE_FRACTION:
+        return None
+    return amount
 
 
 def _redact(text) -> str:
@@ -265,15 +290,15 @@ def _redact(text) -> str:
 
 def save_config():
     if state.lane > 1:
-        # v1.10.0 (WolfBet v2.35.0) — a lane's state holds base + its overrides;
+        # v1.10.0 (WolfBet v2.35.0): a lane's state holds base + its overrides;
         # writing it back would leak them into the shared base config.
         logger.info("save_config skipped on lane %d (base config is lane 1's)", state.lane)
         return
     data = _serialize_keys(_CONFIG_KEYS)
-    # v1.10.0 (WolfBet v2.36.0) — an untouched split base bet is saved as the full one.
+    # v1.10.0 (WolfBet v2.36.0): an untouched split base bet is saved as the full one.
     if state.base_bet_split is not None and state.base_bet == state.base_bet_split:
         data["base_bet"] = state.base_bet_disk
-    # v1.10.0 (WolfBet v2.35.0) — keep the lanes block (count, split, overrides).
+    # v1.10.0 (WolfBet v2.35.0): keep the lanes block (count, split, overrides).
     old = _read_config_raw()
     if old is not None and "lanes" in old:
         data["lanes"] = old["lanes"]
@@ -316,11 +341,11 @@ def _write_config_raw(data: dict) -> None:
 
 
 def _apply_lane_config(data: dict) -> None:
-    """v1.10.0 (WolfBet v2.35.0 / v2.36.0) — lane count, split mode and this
+    """v1.10.0 (WolfBet v2.35.0 / v2.36.0): lane count, split mode and this
     lane's overrides + bet split on top of the base values already applied."""
     state.lanes_count = lanes_count(data)
     state.lane_split = lane_split(data)
-    # v1.11.0 (WolfBet v2.36.0) — a split bet below the learned 422 minimum
+    # v1.11.0 (WolfBet v2.36.0): a split bet below the learned 422 minimum
     # stays full (0 until a 422 is seen: no minimum known).
     merged, warning = lane_config(data, state.lane, _LANE_FORBIDDEN_KEYS, state.min_bet)
     if warning:
@@ -364,7 +389,7 @@ _PRESET_KEYS = [
     "proxy", "purge_days", "db_write_mode",
 ]
 
-# v1.7.0 — fields re-read into a running bot on SIGHUP (WolfBet v2.28.3) without
+# v1.7.0: fields re-read into a running bot on SIGHUP (WolfBet v2.28.3) without
 # touching the session identity, counters or the Martingale ladder. Anything else
 # (faucet included: toggle it with [F]) needs a restart.
 _LIVE_RELOAD_KEYS = {
@@ -375,7 +400,7 @@ _LIVE_RELOAD_KEYS = {
     "milestone_bets", "milestone_wins", "milestone_losses", "milestone_profit",
     "profit_increment", "profit_threshold",
     "custom_rules_text",
-    # v1.9.0 — proxy is re-applied to the live HTTP session; switching
+    # v1.9.0: proxy is re-applied to the live HTTP session; switching
     # db_write_mode to async starts the writer thread.
     "proxy", "purge_days", "db_write_mode",
 }
@@ -391,7 +416,7 @@ def _reload_live_config() -> dict:
     except Exception as e:
         logger.warning("live reload: failed to parse config: %s", e)
         return {}
-    # v1.10.0 (WolfBet v2.35.0 / v2.36.0) — this lane's overrides + bet split.
+    # v1.10.0 (WolfBet v2.35.0 / v2.36.0): this lane's overrides + bet split.
     data = lane_config(data, state.lane, _LANE_FORBIDDEN_KEYS, state.min_bet)[0]
     applied, skipped = {}, []
     tuple_keys = set(_STREAK_TUPLE_KEYS)
@@ -424,7 +449,7 @@ def _reload_live_config() -> dict:
         except Exception as e:
             logger.warning("live reload: rule reparse failed: %s", e)
     if skipped:
-        logger.warning("live reload: skipped %d unsafe field(s) — restart to apply: %s",
+        logger.warning("live reload: skipped %d unsafe field(s): restart to apply: %s",
                        len(skipped), ", ".join(sorted(skipped)))
     return applied
 
@@ -479,7 +504,7 @@ def list_presets() -> dict:
     return _load_all_presets()
 
 # ══════════════════════════════════════════════════════════
-#  RULE-BASED STRATEGY ENGINE  (v2 — DarkDice-inspired)
+#  RULE-BASED STRATEGY ENGINE  (v2: DarkDice-inspired)
 # ══════════════════════════════════════════════════════════
 
 # ── Condition types ──
@@ -542,7 +567,7 @@ def apply_rules(bet_state: str):
 
 
 # ══════════════════════════════════════════════════════════
-#  BOT STATE — single shared object
+#  BOT STATE: single shared object
 # ══════════════════════════════════════════════════════════
 class BotState:
     def __init__(self):
@@ -591,7 +616,7 @@ class BotState:
         self.current_balance= 0.0
 
         # ── streaks ──
-        self.current_streak  = 0   # + = win streak, – = loss streak
+        self.current_streak  = 0   # + = win streak, - = loss streak
         self.max_win_streak  = 0
         self.max_loss_streak = 0
 
@@ -612,7 +637,7 @@ class BotState:
         self.consecutive_errors = 0
         self._insufficient_balance = False
 
-        # ── rate limiting (no headers from DuckDice — Cloudflare-based) ──
+        # ── rate limiting (no headers from DuckDice: Cloudflare-based) ──
         self.rate_limit      = 0
         self.rate_remaining  = 0
         self.rate_wait       = False
@@ -640,7 +665,7 @@ class BotState:
         self.recent_bets = deque(maxlen=10)
 
         # ── status messages ──
-        self.status     = "Initializing…"
+        self.status     = "Initializing..."
         self.last_error = ""
 
         # ── profit-based base bet increment ──
@@ -717,7 +742,7 @@ state   = BotState()
 console = Console()
 
 # ══════════════════════════════════════════════════════════
-#  METRICS  (v1.9.0 — WolfBet v2.17.0 / v2.30.3-v2.30.5)
+#  METRICS  (v1.9.0: WolfBet v2.17.0 / v2.30.3-v2.30.5)
 # ══════════════════════════════════════════════════════════
 def _compute_api_avg() -> float:
     """All-time mean API time in ms (0 when no samples yet)."""
@@ -845,7 +870,7 @@ def _metrics_state_dict() -> dict:
 
 
 # ══════════════════════════════════════════════════════════
-#  RISKY CONFIG  (v1.9.0 — WolfBet v2.22.1 / v2.32.1)
+#  RISKY CONFIG  (v1.9.0: WolfBet v2.22.1 / v2.32.1)
 # ══════════════════════════════════════════════════════════
 # Strategy keys match WolfBet: 2 Martingale, 3 Anti-Martingale, 6 WolfRider,
 # 7 Delay Martingale, 8 Rule-Based. No remap.
@@ -859,16 +884,16 @@ def _check_risky_config() -> list:
 
     if sk == "2" and loss_mult >= 2.5:
         warnings.append(
-            f"Aggressive Martingale (loss_mult={loss_mult}) — a 5-loss streak needs "
+            f"Aggressive Martingale (loss_mult={loss_mult}): a 5-loss streak needs "
             f"~{loss_mult**5:.0f}× base_bet in reserve."
         )
     if sk in ("2", "7") and state.max_loss is None:
         warnings.append(
-            "No `max_loss` set — Martingale-style strategies can drain balance "
+            "No `max_loss` set: Martingale-style strategies can drain balance "
             "on a bad streak. Consider `maxloss <amount>` ([T]weak or --config-set) "
             "to establish a floor."
         )
-    # v1.10.0 (WolfBet v2.35.0) — with a lane budget, a lane may only risk its share.
+    # v1.10.0 (WolfBet v2.35.0): with a lane budget, a lane may only risk its share.
     split = split_budget_on(state.lanes_count, state.lane_split)
     bank = bal / state.lanes_count if split else bal
     depth = martingale_chain_depth(bank, float(state.base_bet or 0), loss_mult)
@@ -887,7 +912,7 @@ def _check_risky_config() -> list:
         pct = state.base_bet / bal * 100
         warnings.append(
             f"Base bet is {pct:.1f}% of current balance ({state.base_bet:.8f} of "
-            f"{bal:.8f}) — small bankrolls drain in ~7 losses at this size."
+            f"{bal:.8f}): small bankrolls drain in ~7 losses at this size."
         )
     if mult > 10:
         warnings.append(
@@ -898,7 +923,7 @@ def _check_risky_config() -> list:
         rd = float(state.recurring_delay or 0)
         gap = f"delay {rd:.0f}s between cycles" if rd > 0 else "back-to-back (no delay)"
         warnings.append(
-            "Recurring restart is on with no max_profit and no max_bets — "
+            "Recurring restart is on with no max_profit and no max_bets: "
             f"sessions could restart indefinitely ({gap}). "
             "Consider setting at least one cap."
         )
@@ -909,12 +934,12 @@ def _check_risky_config() -> list:
         )
     if state.basebet_pct >= 0.05:
         warnings.append(
-            f"basebet_pct = {state.basebet_pct*100:.1f}% of balance — "
+            f"basebet_pct = {state.basebet_pct*100:.1f}% of balance: "
             "the base bet grows quickly on winning streaks."
         )
     if state.proxy and state.proxy.startswith("http://"):
         warnings.append(
-            f"proxy scheme is http:// ({mask_proxy(state.proxy)}) — "
+            f"proxy scheme is http:// ({mask_proxy(state.proxy)}): "
             "credentials + traffic travel unencrypted between you and the proxy. "
             "Prefer https:// or socks5:// when possible."
         )
@@ -1092,7 +1117,7 @@ def cmd_run_reset(lane: int = None) -> int:
 
 
 # ══════════════════════════════════════════════════════════
-#  RUNTIME TWEAK  (v1.9.0 — WolfBet v2.19.0; mirrors tg /tweak)
+#  RUNTIME TWEAK  (v1.9.0: WolfBet v2.19.0; mirrors tg /tweak)
 # ══════════════════════════════════════════════════════════
 _TWEAK_ALIAS = {
     "delay":       "bet_delay",
@@ -1158,10 +1183,8 @@ def _apply_mutation(changes: dict) -> list:
         return val
 
     def _num(name, v, cast=float):
-        try:
-            return cast(v)
-        except (TypeError, ValueError):
-            raise ValueError(f"{name} must be a number, got {v!r}")
+        number = finite_float(name, v)
+        return int(number) if cast is int else number
 
     if "bet_delay" in changes:
         v = changes["bet_delay"]
@@ -1304,7 +1327,7 @@ def _apply_mutation(changes: dict) -> list:
         state.db_write_mode = v
         msgs.append(f"DB write mode: {state.db_write_mode}")
 
-    # Strategy config — applies to the next bet (no server-side auto-bet to restart).
+    # Strategy config: applies to the next bet (no server-side auto-bet to restart).
     if "base_bet" in changes:
         bet = _num("base_bet", changes["base_bet"])
         if bet <= 0:
@@ -1335,7 +1358,7 @@ def _apply_mutation(changes: dict) -> list:
 # ══════════════════════════════════════════════════════════
 #  API HELPERS
 # ══════════════════════════════════════════════════════════
-# v1.9.0 — every API call goes through one session so the proxy (WolfBet
+# v1.9.0: every API call goes through one session so the proxy (WolfBet
 # v2.26.0) and connection pooling apply to bets, balance reads and --benchmark.
 _http_session = requests.Session()
 
@@ -1438,18 +1461,25 @@ def api_place_bet(amount: float) -> Optional[dict]:
                 },
             }
         elif r.status_code == 422:
-            # Validation error — parse minimum bet or stop
+            # Validation error: parse minimum bet or stop
             try:
                 err_data = r.json()
                 err_msg = err_data.get("error", "")
                 params = err_data.get("params", {})
                 min_amount = params.get("amount")
                 if min_amount and "minimum bet" in err_msg.lower():
-                    min_bet = float(min_amount)
-                    logger.warning("MIN BET %.8f — adjusting base_bet and current_bet",
-                                   min_bet)
-                    # v1.10.0 — per lane (state is per process). The next
-                    # should_stop() checks the raised bet against lane equity.
+                    with state.lock:
+                        base_before = state.base_bet
+                        balance_now = state.current_balance
+                    min_bet = _bounded_min_bet(min_amount, base_before, balance_now)
+                    if min_bet is None:
+                        logger.error("422 minimum bet %r is out of range; stopping", min_amount)
+                        with state.lock:
+                            state.running = False
+                            state.last_error = "Server minimum bet is out of range"
+                            state.stop_reason = "API minimum bet rejected as out of range"
+                        return None
+                    logger.warning("MIN BET %.8f - adjusting base_bet and current_bet", min_bet)
                     with state.lock:
                         state.min_bet = min_bet   # floor for basebet_pct, kept across cycles
                         state.base_bet = min_bet
@@ -1466,11 +1496,11 @@ def api_place_bet(amount: float) -> Optional[dict]:
                 state.running = False
                 state.stop_reason = f"API validation error: {r.text[:120]}"
         elif r.status_code == 429:
-            logger.warning("RATE LIMIT 429 — starting exponential backoff")
+            logger.warning("RATE LIMIT 429: starting exponential backoff")
             with state.lock:
                 state.rate_wait    = True
                 state.rate_backoff = 2.0
-                state.last_error   = "Rate limit 429 — backing off…"
+                state.last_error   = "Rate limit 429: backing off..."
         else:
             body = r.text[:500]
             logger.error("HTTP %d  response=%s  payload=%s",
@@ -1480,7 +1510,7 @@ def api_place_bet(amount: float) -> Optional[dict]:
     except requests.exceptions.Timeout:
         logger.warning("REQUEST TIMEOUT on bet #%d", state.total_bets + 1)
         with state.lock:
-            state.last_error = "Request timeout — retrying…"
+            state.last_error = "Request timeout: retrying..."
     except Exception as e:
         err_str = str(e).lower()
         if "insufficient" in err_str:
@@ -1489,7 +1519,7 @@ def api_place_bet(amount: float) -> Optional[dict]:
                 state.last_error = "Insufficient balance"
                 state._insufficient_balance = True
         else:
-            # v1.9.0 — the message can quote the request URL, which holds the key.
+            # v1.9.0: the message can quote the request URL, which holds the key.
             logger.exception("UNEXPECTED ERROR placing bet: %s", _redact(e))
             with state.lock:
                 state.last_error = _redact(e)[:120]
@@ -1533,7 +1563,7 @@ def should_stop() -> tuple:
     if streak_reset_triggered(state.current_streak, state.last_broken_loss_streak,
                               state.streak_reset_losses, p):
         return True, streak_reset_stop_reason(state.last_broken_loss_streak)
-    # v1.10.0 (WolfBet v2.35.0) — split budget: a lane may only risk its share.
+    # v1.10.0 (WolfBet v2.35.0): split budget: a lane may only risk its share.
     # Not on the restart whitelist, so the lane stops for good.
     over, reason = lane_budget_exceeded(state.current_bet, lane_equity_now())
     if over:
@@ -1547,7 +1577,7 @@ def lane_equity_now() -> Optional[float]:
 
 
 def _init_lane_budget() -> None:
-    """v1.10.0 (WolfBet v2.35.0) — fix this lane's share of the balance at bot start."""
+    """v1.10.0 (WolfBet v2.35.0): fix this lane's share of the balance at bot start."""
     state.lane_share = lane_share(state.current_balance, state.lanes_count, state.lane_split)
     if state.lane_share is not None:
         logger.warning("LANE %d/%d  share=%.8f of balance %.8f",
@@ -1560,8 +1590,8 @@ def _apply_basebet_pct() -> bool:
     minimum). Returns True if it changed."""
     if state.basebet_pct <= 0 or state.current_balance <= 0:
         return False
-    # v1.10.0 (WolfBet v2.36.0) — bet split divides by the lane count.
-    # v1.11.0 — a split bet that rounds to 0 or is below the learned minimum
+    # v1.10.0 (WolfBet v2.36.0): bet split divides by the lane count.
+    # v1.11.0: a split bet that rounds to 0 or is below the learned minimum
     # stays full; an unsplit bet below it is still floored to it.
     new_base, note = split_base_bet(
         round(state.current_balance * state.basebet_pct, 8),
@@ -1619,7 +1649,7 @@ def _reset_session_for_recurring(delay: float) -> None:
         state.session_pause_started_at = bet_end
         state.session_pause_total      = delay
     if delay > 0:
-        state.status = f"Recurring pause {delay:.0f}s before next cycle…"
+        state.status = f"Recurring pause {delay:.0f}s before next cycle..."
         logger.info("RECURRING pause %.0fs before next cycle", delay)
         _interruptible_sleep(delay)
     if not state.running:
@@ -1632,7 +1662,7 @@ def _reset_session_for_recurring(delay: float) -> None:
         state.total_bets     = 0
         state.wins           = 0
         state.losses         = 0
-        # v1.10.0 (WolfBet v2.35.0) — lane equity carries the lane's result.
+        # v1.10.0 (WolfBet v2.35.0): lane equity carries the lane's result.
         state.lane_run_profit += state.profit
         # v1.12.0 (WolfBet v2.37.0): the finished session's profit joins the run total.
         state.run_profit_done += state.profit
@@ -1667,7 +1697,7 @@ def _reset_session_for_recurring(delay: float) -> None:
         state.consecutive_errors = 0
         state.backoff_delay  = 1.0
         state.last_error     = ""
-        state.status = f"Recurring restart — session #{state.session_id}"
+        state.status = f"Recurring restart: session #{state.session_id}"
         _attach_run(state.session_id)
     logger.info("RECURRING RESTART complete: new session #%d, base_bet=%.8f, balance=%.8f, faucet=%s",
                 state.session_id, state.base_bet, state.current_balance, state.faucet)
@@ -1681,14 +1711,14 @@ def betting_loop():
     while state.running:
         # ── paused ──────────────────────────────────────
         if state.paused:
-            state.status = "PAUSED — press [R] to resume"
+            state.status = "PAUSED: press [R] to resume"
             time.sleep(0.4)
             continue
 
         # ── rate-limit cooldown with exponential probe ──
         if state.rate_wait:
             backoff = state.rate_backoff
-            state.status = f"Rate limit — probing in {backoff:.0f}s…"
+            state.status = f"Rate limit: probing in {backoff:.0f}s..."
             time.sleep(backoff)
 
             # Probe: lightweight GET to check if capacity restored
@@ -1698,21 +1728,21 @@ def betting_loop():
                     with state.lock:
                         state.rate_wait    = False
                         state.rate_backoff = 2.0
-                    state.status = "Rate limit cleared — resuming…"
+                    state.status = "Rate limit cleared: resuming..."
                     logger.info("Rate limit probe OK, resuming")
                 else:
                     with state.lock:
                         state.rate_backoff = min(backoff * 2, 32.0)
-                    state.status = f"Rate limit — next probe in {state.rate_backoff:.0f}s…"
+                    state.status = f"Rate limit: next probe in {state.rate_backoff:.0f}s..."
                     logger.info("Rate limit probe: HTTP %d, backoff → %.0fs", r.status_code, state.rate_backoff)
             except Exception as e:
                 with state.lock:
                     state.rate_backoff = min(backoff * 2, 32.0)
-                state.status = f"Rate probe failed — retrying in {state.rate_backoff:.0f}s…"
+                state.status = f"Rate probe failed: retrying in {state.rate_backoff:.0f}s..."
                 logger.warning("Rate limit probe failed: %s, backoff → %.0fs", e, state.rate_backoff)
             continue
 
-        cycle_t0 = time.monotonic()   # v1.9.0 — per-bet cycle time (WolfBet v2.30.4)
+        cycle_t0 = time.monotonic()   # v1.9.0: per-bet cycle time (WolfBet v2.30.4)
 
         # ── stop-condition check ─────────────────────────
         stop, reason = should_stop()
@@ -1747,7 +1777,7 @@ def betting_loop():
             time.sleep(state.bet_delay)
 
         # ── place bet ────────────────────────────────────
-        state.status = f"Placing bet #{state.total_bets + 1}…"
+        state.status = f"Placing bet #{state.total_bets + 1}..."
         result = api_place_bet(state.current_bet)
 
         if result is None:
@@ -1773,7 +1803,7 @@ def betting_loop():
         amount_used  = float(bet_data.get("amount", state.current_bet))
         new_balance  = float(balance_data.get("amount", state.current_balance))
 
-        # Use API's profit directly — it's positive on win, negative on loss
+        # Use API's profit directly: it's positive on win, negative on loss
         raw_profit = float(bet_data.get("profit", 0))
 
         with state.lock:
@@ -1836,7 +1866,7 @@ def betting_loop():
             sec_key = int(now)
             min_key = int(now) // 60
             if sec_key != state._current_sec:
-                # new second — record the old second's count
+                # new second: record the old second's count
                 if state._current_sec > 0 and state._bets_this_sec > 0:
                     if state._bets_this_sec > state.peak_bps:
                         state.peak_bps = state._bets_this_sec
@@ -1848,7 +1878,7 @@ def betting_loop():
                 state._bets_this_sec += 1
 
             if min_key != state._current_min:
-                # new minute — record the old minute's count
+                # new minute: record the old minute's count
                 if state._current_min > 0 and state._bets_this_min > 0:
                     if state._bets_this_min > state.peak_bpm:
                         state.peak_bpm = state._bets_this_min
@@ -1888,7 +1918,7 @@ def betting_loop():
             with state.lock:
                 state.status = f"Milestone: {ms_reason}"
 
-        # calculate next bet — no cap, API rejects if insufficient balance
+        # calculate next bet: no cap, API rejects if insufficient balance
         raw_next  = compute_next_bet(bet_state)
         next_bet  = max(state.base_bet, raw_next)
         sb_factor = streakbet_loss_factor(state.current_streak, state.streakbet_loss)
@@ -1905,7 +1935,7 @@ def betting_loop():
 # ══════════════════════════════════════════════════════════
 def _db_conn():
     conn = db_connect(DB_PATH)
-    # v1.5.0 — mirrors wolfbet v2.27.0. WAL-safe.
+    # v1.5.0: mirrors wolfbet v2.27.0. WAL-safe.
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA cache_size = -32000")
@@ -1989,7 +2019,7 @@ def _bet_writer_worker():
     try:
         conn = _db_conn()
     except Exception as e:
-        logger.error("bet writer failed to open DB (%s) — rows fall back to sync on overflow", e)
+        logger.error("bet writer failed to open DB (%s): rows fall back to sync on overflow", e)
         return
     while not (_bet_writer_stop.is_set() and _bet_write_queue.empty()):
         batch = []
@@ -2018,7 +2048,7 @@ def _bet_writer_worker():
             try:
                 conn = _db_conn()
             except Exception as reopen_err:
-                logger.error("bet writer reopen failed: %s — exiting worker", reopen_err)
+                logger.error("bet writer reopen failed: %s: exiting worker", reopen_err)
                 return
     try:
         conn.close()
@@ -2194,7 +2224,7 @@ def _save_state_file():
             # rule-based info
             "rule_count": len(state.custom_rules) if state.strategy_key == "8" else 0,
             "rule_descriptions": [r.description for r in state.custom_rules] if state.strategy_key == "8" else [],
-            # v1.7.0 — uptime freezes at bet-end during a cycle pause (WolfBet v2.28.4)
+            # v1.7.0: uptime freezes at bet-end during a cycle pause (WolfBet v2.28.4)
             "uptime_sec": _uptime_sec(),
             "run_uptime_sec": int(time.time() - state.run_started_at),
             "pause_remaining_sec": _pause_remaining_sec(),
@@ -2204,10 +2234,10 @@ def _save_state_file():
             "streak_reset_losses": state.streak_reset_losses,
             "streak_reset_delay_sec": int(state.streak_reset_delay),
             "next_profit_milestone": state.next_profit_milestone,
-            # v1.9.0 — observability (WolfBet v2.17.0 / v2.30.3-v2.30.5 / v2.27.0)
+            # v1.9.0: observability (WolfBet v2.17.0 / v2.30.3-v2.30.5 / v2.27.0)
             **_metrics_state_dict(),
             "purge_days": state.purge_days,
-            # v1.10.0 (WolfBet v2.35.0 / v2.36.0) — parallel lanes
+            # v1.10.0 (WolfBet v2.35.0 / v2.36.0): parallel lanes
             "lane": state.lane,
             "lanes_count": state.lanes_count,
             "lane_share": state.lane_share,
@@ -2232,13 +2262,13 @@ def _cleanup_state_file():
             pass
 
 # ══════════════════════════════════════════════════════════
-#  TUI — BORDERLESS ULTRA-COMPACT DASHBOARD
+#  TUI: BORDERLESS ULTRA-COMPACT DASHBOARD
 # ══════════════════════════════════════════════════════════
 SPARKLINE = "▁▂▃▄▅▆▇█"
 
 def _sparkline(values) -> str:
     if not values or len(values) < 2:
-        return "—"
+        return "-"
     mn, mx = min(values), max(values)
     span   = mx - mn or 1
     return "".join(SPARKLINE[int((v - mn) / span * 7)] for v in values)
@@ -2318,7 +2348,7 @@ def build_dashboard_screen() -> str:
       Row 6:       Sparkline (P/L graph)
       Row 7:       Separator ───
       Row 8:       Bets table header
-      Row 9..N-2:  Recent bets (flex — fills remaining, padded with blanks)
+      Row 9..N-2:  Recent bets (flex: fills remaining, padded with blanks)
       Row N-1:     Separator ───
       Row N:       Status + controls
     """
@@ -2380,7 +2410,7 @@ def build_dashboard_screen() -> str:
     elif cs < 0:
         sk = _a("red", f"L{cs}")
     else:
-        sk = _a("dim", "—")
+        sk = _a("dim", "-")
 
     add(f" {_a('dim', 'Bets')} {_a('bold_white', str(state.total_bets))}"
         f"  {_a('green', 'W')} {_a('bold_green', str(state.wins))}"
@@ -2506,17 +2536,17 @@ def show_history():
         t.add_row(
             str(sid),
             (started or "").replace("T", " "),
-            (ended   or "—").replace("T", " "),
+            (ended   or "-").replace("T", " "),
             (cur or "").upper(),
-            strat or "—",
+            strat or "-",
             str(bets or 0),
             Text(f"{ps}{profit:.8f}" if profit else "0.00000000", style=pc),
-            f"{wagered:.8f}" if wagered else "—",
+            f"{wagered:.8f}" if wagered else "-",
             f"W{mws or 0}/L{mls or 0}",
         )
 
     console.print(t)
-    console.print("\n[dim]  Press any key to return…[/]")
+    console.print("\n[dim]  Press any key to return...[/]")
     _getch()
     state.paused = was_paused
 
@@ -2623,7 +2653,7 @@ def input_handler():
         if ch in ("q", "\x03", "\x1c"):  # Q, Ctrl+C, Ctrl+backslash
             state.running  = False
             state.paused   = False
-            state.status   = "Stopping — saving session…"
+            state.status   = "Stopping: saving session..."
             logger.warning("SESSION END (user quit)  bets=%d  profit=%+.8f  balance=%.8f",
                         state.total_bets, state.profit, state.current_balance)
             _db_save_session()
@@ -2634,7 +2664,7 @@ def input_handler():
             state.paused = False
             state.status = "Resumed"
         elif ch == "f":
-            # v1.10.0 — faucet can't run with parallel lanes.
+            # v1.10.0: faucet can't run with parallel lanes.
             refusal = _faucet_lanes_conflict(state.lanes_count, not state.faucet)
             if refusal:
                 state.status = refusal
@@ -2903,7 +2933,7 @@ def _edit_one_rule(old: StrategyRule):
             return r
 
         if pick == replace_n:
-            console.print("    [dim]Building replacement rule…[/]")
+            console.print("    [dim]Building replacement rule...[/]")
             replacement = _build_one_rule()
             if replacement is _BACK:
                 continue
@@ -2924,7 +2954,7 @@ def _edit_one_rule(old: StrategyRule):
                 continue
             new_type = COND_TYPES[ct]
             if new_type != r.cond_type:
-                # Type changed — reset related fields to defaults
+                # Type changed: reset related fields to defaults
                 r.cond_type = new_type
                 if new_type == "sequence":
                     r.cond_field = ""
@@ -3057,15 +3087,15 @@ def setup_wizard():
         console.print(f"    [dim]Strategy:[/]   [yellow]{state.strategy}[/]")
         console.print(f"    [dim]Multiplier:[/] [yellow]{state.multiplier}x[/]")
         console.print(f"    [dim]Base bet:[/]   [yellow]{state.base_bet:.8f}[/]")
-        console.print(f"    [dim]API key:[/]    [yellow]{saved_key[:8]}…{saved_key[-4:]}[/]")
+        console.print(f"    [dim]API key:[/]    [yellow]{saved_key[:8]}...{saved_key[-4:]}[/]")
         console.print()
 
     # ── Step functions ────────────────────────────────────
     def step_api_key():
         nonlocal balances, saved_key
-        console.print(Rule("[bold cyan]Step 1 / 7 — API Authentication[/]"))
+        console.print(Rule("[bold cyan]Step 1 / 7: API Authentication[/]"))
         if saved_key:
-            console.print(f"  Saved key: [yellow]{saved_key[:8]}…{saved_key[-4:]}[/]")
+            console.print(f"  Saved key: [yellow]{saved_key[:8]}...{saved_key[-4:]}[/]")
             v = _ask("Use saved API key? (y/n)", default="y", choices=["y", "n"])
             if v is _BACK:
                 return False
@@ -3086,7 +3116,7 @@ def setup_wizard():
             state.api_key = v
             saved_key = v
 
-        console.print("  [dim]Testing connection…[/]")
+        console.print("  [dim]Testing connection...[/]")
         try:
             balances = api_get_balances()
             console.print("[green]  Connected![/]\n")
@@ -3101,7 +3131,7 @@ def setup_wizard():
 
     def step_currency():
         nonlocal available_bal
-        console.print(Rule("[bold cyan]Step 2 / 7 — Currency[/]"))
+        console.print(Rule("[bold cyan]Step 2 / 7: Currency[/]"))
         if balances:
             console.print("  [dim]Your balances:[/]")
             for b in balances:
@@ -3128,7 +3158,7 @@ def setup_wizard():
         return True
 
     def step_bet_config():
-        console.print(Rule("[bold cyan]Step 3 / 7 — Bet Configuration[/]"))
+        console.print(Rule("[bold cyan]Step 3 / 7: Bet Configuration[/]"))
         console.print("  [dim]Game: Dice (Original Dice on DuckDice)[/]\n")
 
         v = _ask("Bet direction", default=state.rule, choices=["over", "under"])
@@ -3169,7 +3199,7 @@ def setup_wizard():
         return True
 
     def step_strategy():
-        console.print(Rule("[bold cyan]Step 4 / 7 — Betting Strategy[/]"))
+        console.print(Rule("[bold cyan]Step 4 / 7: Betting Strategy[/]"))
         for k, (name, desc) in STRATEGIES.items():
             console.print(f"    [bold yellow][{k}][/] [cyan]{name:20s}[/]  [dim]{desc}[/]")
         console.print()
@@ -3205,7 +3235,7 @@ def setup_wizard():
             console.print()
 
         if v == "6":
-            console.print("  [bold cyan]WolfRider[/] — your dedicated strategy:")
+            console.print("  [bold cyan]WolfRider[/]: your dedicated strategy:")
             console.print(f"    [green]• On win:[/]  reset to base bet")
             console.print(f"    [green]• On loss:[/] multiply by {state.loss_mult}x")
             console.print("    [green]• Switch over/under[/] on every 2nd, 6th, and 9th bet")
@@ -3213,7 +3243,7 @@ def setup_wizard():
 
         elif v == "7":
             console.print()
-            console.print("  [bold cyan]Delay Martingale[/] — flat bet through the first N")
+            console.print("  [bold cyan]Delay Martingale[/]: flat bet through the first N")
             console.print("  consecutive losses, then start doubling.")
             console.print()
             d = _ask("  Losses before doubling starts", default=str(state.delay_martin_threshold))
@@ -3224,7 +3254,7 @@ def setup_wizard():
 
         elif v == "8":
             console.print()
-            console.print("  [bold cyan]Rule-Based Strategy[/] — build custom conditions & actions")
+            console.print("  [bold cyan]Rule-Based Strategy[/]: build custom conditions & actions")
             console.print("  [dim]Each rule: IF <condition> THEN <action>[/]")
             console.print()
 
@@ -3298,7 +3328,7 @@ def setup_wizard():
                         console.print("    [yellow]All rules cleared.[/]\n")
 
                 else:
-                    # No existing rules — go straight to builder
+                    # No existing rules: go straight to builder
                     console.print("  [dim]No rules yet. Let's build some.[/]\n")
                     rule = _build_one_rule()
                     if rule is _BACK:
@@ -3313,13 +3343,13 @@ def setup_wizard():
                 state.custom_rules_text = json.dumps([r.to_dict() for r in state.custom_rules])
                 console.print(f"  [bold green]→ {len(state.custom_rules)} rule(s) configured[/]\n")
             else:
-                console.print("  [yellow]No rules configured — will use Flat bet.[/]\n")
+                console.print("  [yellow]No rules configured: will use Flat bet.[/]\n")
 
         console.print()
         return True
 
     def step_stop_conditions():
-        console.print(Rule("[bold cyan]Step 5 / 7 — Stop Conditions[/]"))
+        console.print(Rule("[bold cyan]Step 5 / 7: Stop Conditions[/]"))
         console.print("  [dim]Enter to keep current  |  'none' to clear  |  'back' for previous step[/]\n")
 
         v = _ask_optional(f"Stop when profit reaches ({state.currency.upper()})", state.max_profit)
@@ -3347,7 +3377,7 @@ def setup_wizard():
             return False
         state.stop_on_balance = float(v) if v else None
 
-        console.print("\n  [bold]Profit-based bet increment[/] [dim]— auto-raise base bet as profit grows[/]")
+        console.print("\n  [bold]Profit-based bet increment[/] [dim]- auto-raise base bet as profit grows[/]")
         v = _ask_optional(f"Profit threshold to trigger increment ({state.currency.upper()})", state.profit_threshold)
         if v is _BACK:
             return False
@@ -3375,9 +3405,9 @@ def setup_wizard():
         return True
 
     def step_advanced_tuning():
-        """v1.9.0 — optional session tuning (WolfBet v2.18.0 Step 5b): recurring, streak
+        """v1.9.0: optional session tuning (WolfBet v2.18.0 Step 5b): recurring, streak
         reset, basebet_pct, streak delays, milestones. No pipeline (N/A)."""
-        console.print(Rule("[bold cyan]Step 5b / 7 — Advanced session tuning (optional)[/]"))
+        console.print(Rule("[bold cyan]Step 5b / 7: Advanced session tuning (optional)[/]"))
         has_any = (state.recurring or state.streak_reset_losses or state.basebet_pct
                    or state.streak_delay_loss[0] or state.streak_delay_win[0]
                    or state.streak_delay_bets[0] or state.streakbet_loss[0])
@@ -3477,7 +3507,7 @@ def setup_wizard():
         return True
 
     def step_preset():
-        console.print(Rule("[bold cyan]Step 6 / 7 — Presets[/]"))
+        console.print(Rule("[bold cyan]Step 6 / 7: Presets[/]"))
         presets = list_presets()
         if presets:
             console.print("  [dim]Saved presets:[/]")
@@ -3496,7 +3526,7 @@ def setup_wizard():
         return True
 
     def step_confirm():
-        console.print(Rule("[bold green]Step 7 / 7 — Review & Confirm[/]"))
+        console.print(Rule("[bold green]Step 7 / 7: Review & Confirm[/]"))
         rows = [
             ("Currency",        f"{state.currency.upper()}"),
             ("Balance",         f"{state.start_balance:.8f}"),
@@ -3513,13 +3543,13 @@ def setup_wizard():
         if state.strategy_key == "8" and state.custom_rules:
             rows.append(("Rules",       f"{len(state.custom_rules)} custom rule(s)"))
         rows += [
-            ("Max profit",      str(state.max_profit) if state.max_profit else "—"),
-            ("Max loss",        str(state.max_loss)   if state.max_loss   else "—"),
+            ("Max profit",      str(state.max_profit) if state.max_profit else "-"),
+            ("Max loss",        str(state.max_loss)   if state.max_loss   else "-"),
             ("Max bets",        str(state.max_bets)   if state.max_bets   else "Unlimited"),
             ("Max wins",        str(state.max_wins)   if state.max_wins   else "Unlimited"),
-            ("Min balance",     str(state.stop_on_balance) if state.stop_on_balance else "—"),
+            ("Min balance",     str(state.stop_on_balance) if state.stop_on_balance else "-"),
             ("Profit increment", f"+{state.profit_increment:.8f} every {state.profit_threshold} profit"
-                if state.profit_increment and state.profit_threshold else "—"),
+                if state.profit_increment and state.profit_threshold else "-"),
             ("Increment scope",  state.profit_increment_scope if state.profit_increment and state.profit_threshold else "-"),
         ]
         for k, val in rows:
@@ -3537,7 +3567,7 @@ def setup_wizard():
             console.print(Panel(
                 "\n".join(f"• {w}" for w in risky)
                 + "\n\n[dim]These are safety hints, not blockers. Press y to proceed anyway.[/]",
-                title="⚠️  Heads-up — review before starting", border_style="yellow"))
+                title="⚠️  Heads-up: review before starting", border_style="yellow"))
 
         console.print()
         console.print("[bold red]  WARNING: Real money will be wagered. Bet responsibly.[/]")
@@ -3591,7 +3621,7 @@ def _print_summary():
         ("Session ID",      str(state.session_id)),
         ("Total Bets",      str(state.total_bets)),
         ("Wins / Losses",   f"{state.wins} / {state.losses}"),
-        ("Win Rate",        f"{state.wins/state.total_bets*100:.1f}%" if state.total_bets else "—"),
+        ("Win Rate",        f"{state.wins/state.total_bets*100:.1f}%" if state.total_bets else "-"),
         ("Profit",          f"{state.profit:+.8f} {state.currency.upper()}"),
         ("Start Balance",   f"{state.start_balance:.8f} {state.currency.upper()}"),
         ("Final Balance",   f"{state.current_balance:.8f} {state.currency.upper()}"),
@@ -3664,13 +3694,13 @@ def _pct_color(pct: float) -> str:
 
 
 def _build_config_progress_row(d: dict) -> str:
-    """Row 6 — live config-progress summary (v1.5.0)."""
+    """Row 6: live config-progress summary (v1.5.0)."""
     segments = []
 
     profit_threshold = d.get("profit_threshold")
     profit_increment = d.get("profit_increment")
     if profit_threshold and profit_increment is not None:
-        # v1.7.0 — progress inside the current bump window (WolfBet v2.30.1 / v2.30.7):
+        # v1.7.0: progress inside the current bump window (WolfBet v2.30.1 / v2.30.7):
         # the bump code's next_profit_milestone, one threshold unit wide.
         # v1.12.0: run scope measures the run total instead of the session profit.
         run_scope = d.get("profit_increment_scope") == "run"
@@ -3874,7 +3904,7 @@ def _build_monitor_screen(d: dict, bets: list, pid_alive: bool) -> str:
     elif cs < 0:
         sk = _a("red", f"L{cs}")
     else:
-        sk = _a("dim", "—")
+        sk = _a("dim", "-")
     add(f" {_a('dim', 'Bets')} {_a('bold_white', str(total))}"
         f"  {_a('green', 'W')} {_a('bold_green', str(wins))}"
         f"  {_a('red', 'L')} {_a('bold_red', str(losses))}"
@@ -3949,10 +3979,10 @@ def _build_monitor_screen(d: dict, bets: list, pid_alive: bool) -> str:
     add(_a("dim_blue", "─" * term_w))
 
     # ── Row N: Status + controls ──────────────────────
-    status_txt = status[:60] if status else "Monitoring…"
+    status_txt = status[:60] if status else "Monitoring..."
     keys = "[P]ause [R]esume [Q]uit/Detach [S]top daemon"
     add(f" {_a('bold_white', 'MONITOR')} {_a('white', status_txt)}  {_a('dim', keys)}")
-    # v1.9.0 — footer hints (WolfBet v2.28.1); the monitor has no tweak prompt.
+    # v1.9.0: footer hints (WolfBet v2.28.1); the monitor has no tweak prompt.
     add(f" {_a('dim', 'Tweak config: python3 duckdice.py --config-set KEY=VALUE   · Stats: duckctl stats / analytics')}")
 
     return "\r\n".join(lines)
@@ -3970,7 +4000,7 @@ def cmd_monitor():
         return
 
     sid = d.get("session_id", 0)
-    console.print(f"[dim]Attaching to session #{sid} (PID {pid})… "
+    console.print(f"[dim]Attaching to session #{sid} (PID {pid})... "
                   f"Keys: P pause · R resume · Q detach · S stop daemon. "
                   f"Tweak with: python3 duckdice.py --config-set KEY=VALUE[/]")
     time.sleep(0.5)
@@ -4081,7 +4111,7 @@ def cmd_monitor():
 #  --status COMMAND
 # ══════════════════════════════════════════════════════════
 def _read_lane_states() -> list:
-    """v1.10.0 (WolfBet v2.35.0) — [(lane, state-dict | None, alive)] for lanes
+    """v1.10.0 (WolfBet v2.35.0): [(lane, state-dict | None, alive)] for lanes
     1..LANES_MAX that have a state file."""
     out = []
     for k in range(1, LANES_MAX + 1):
@@ -4106,7 +4136,7 @@ def _read_lane_states() -> list:
 
 
 def cmd_lanes_status():
-    """v1.10.0 (WolfBet v2.35.0) — one row per lane + totals. No Pace column:
+    """v1.10.0 (WolfBet v2.35.0): one row per lane + totals. No Pace column:
     DuckDice sends no rate-limit quota headers (no soft pacing)."""
     rows = _read_lane_states()
     if not rows:
@@ -4193,7 +4223,7 @@ def cmd_status():
     elif cs < 0:
         sk_now = f"L{cs}"
     else:
-        sk_now = "—"
+        sk_now = "-"
 
     console.print(Rule(f"[bold cyan]DuckDice Session #{d.get('session_id', '?')}  {status}[/]"))
 
@@ -4235,7 +4265,7 @@ def cmd_status():
         ("Worst Loss",     f"[red]-{big_loss:.8f}[/]"),
         ("Speed",          f"{bps:.1f}/s  {bpm:.0f}/m  Range: {lw_bps}-{pk_bps}/s  {lw_bpm}-{pk_bpm}/m"),
     ]
-    # v1.9.0 — API / cycle / efficiency (WolfBet v2.17.0 / v2.30.3-v2.30.5). The old
+    # v1.9.0: API / cycle / efficiency (WolfBet v2.17.0 / v2.30.3-v2.30.5). The old
     # "Rate Limit" row read `rate_remaining`, which nothing wrote: DuckDice sends no quota headers.
     if "api_p50_ms" in d:
         tmax = float(d.get("theoretical_max_bps") or 0)
@@ -4372,7 +4402,7 @@ def cmd_stats(since: str = None, until: str = None, lane: int = None):
     conn = _db_conn()
     limit = 50 if (since or until) else 20
 
-    # session list — fetch all columns
+    # session list: fetch all columns
     rows = conn.execute(f"""
         SELECT id, started_at AS started, ended_at AS ended,
                UPPER(currency) AS cur, strategy, multiplier, base_bet,
@@ -4420,7 +4450,7 @@ def cmd_stats(since: str = None, until: str = None, lane: int = None):
         s_low_bpm = int(s_low_bpm or 0)
         pc = "green" if profit >= 0 else "red"
         ps = "+" if profit >= 0 else ""
-        wr = f"{wins/bets*100:.1f}%" if bets > 0 else "—"
+        wr = f"{wins/bets*100:.1f}%" if bets > 0 else "-"
         avg_pnl = profit / bets if bets > 0 else 0
         avg_c = "green" if avg_pnl >= 0 else "red"
         avg_s = "+" if avg_pnl >= 0 else ""
@@ -4447,7 +4477,7 @@ def cmd_stats(since: str = None, until: str = None, lane: int = None):
         console.print(f"    [dim]Streaks:[/] W+{mws}  L-{mls}  [dim]Best Win:[/] [green]+{hi_win:.8f}[/]  [dim]Worst Loss:[/] [red]-{big_loss:.8f}[/]")
         console.print()
 
-    # totals — honor the same window as the listing (WolfBet v2.30.9)
+    # totals: honor the same window as the listing (WolfBet v2.30.9)
     span_first, span_last, span_sec, bet_sec = sessions_time_span(conn, where, params)
     totals = conn.execute(f"""
         SELECT COUNT(*), COALESCE(SUM(total_bets),0), COALESCE(SUM(wins),0),
@@ -4472,7 +4502,7 @@ def cmd_stats(since: str = None, until: str = None, lane: int = None):
         max_wins_s, avg_wins_s, max_losses_s, avg_losses_s = totals
     pc = "green" if tot_profit >= 0 else "red"
     ps = "+" if tot_profit >= 0 else ""
-    wr = f"{tot_wins/tot_bets*100:.1f}%" if tot_bets > 0 else "—"
+    wr = f"{tot_wins/tot_bets*100:.1f}%" if tot_bets > 0 else "-"
     bp_c = "green" if best_profit >= 0 else "red"
     wp_c = "green" if worst_profit >= 0 else "red"
     avg_pnl = tot_profit / tot_bets if tot_bets > 0 else 0
@@ -4605,7 +4635,7 @@ def _print_analytics_table(title: str, rows: list, key_label: str):
     t.add_column("P/L",      justify="right")
     t.add_column("Wagered",  justify="right")
     for r in rows:
-        wr = f"{r['wins']/r['bets']*100:.1f}%" if r['bets'] > 0 else "—"
+        wr = f"{r['wins']/r['bets']*100:.1f}%" if r['bets'] > 0 else "-"
         pc = 'green' if r['profit'] >= 0 else 'red'
         ps = '+' if r['profit'] >= 0 else ''
         t.add_row(str(r['key']), f"{r['sessions']:,}", f"{r['bets']:,}",
@@ -4626,7 +4656,7 @@ def _print_top_sessions_table(title: str, rows: list):
     t.add_column("Wagered",  justify="right")
     t.add_column("Started",  style="dim")
     for r in rows:
-        wr = f"{r['wins']/r['bets']*100:.1f}%" if r['bets'] > 0 else "—"
+        wr = f"{r['wins']/r['bets']*100:.1f}%" if r['bets'] > 0 else "-"
         pc = 'green' if r['profit'] >= 0 else 'red'
         ps = '+' if r['profit'] >= 0 else ''
         started_short = (r['started_at'] or "").replace("T", " ")[:19]
@@ -4639,7 +4669,7 @@ def _print_top_sessions_table(title: str, rows: list):
 def cmd_analytics(since: str = None, until: str = None, lane: int = None):
     """Aggregates over saved sessions, optionally windowed by started_at / lane."""
     if not os.path.exists(DB_PATH):
-        console.print("[yellow]No database found — run a session first.[/]")
+        console.print("[yellow]No database found: run a session first.[/]")
         return
     init_db()   # migrate old DBs (sessions.lane) before querying
     window = _window_or_error(since, until, lane)
@@ -4648,11 +4678,11 @@ def cmd_analytics(since: str = None, until: str = None, lane: int = None):
     where, wparams, wlabel = window
     lifetime = _analytics_lifetime(where, wparams)
     if lifetime["sessions_total"] == 0:
-        console.print("[yellow]No sessions in the DB yet — run a session first.[/]")
+        console.print("[yellow]No sessions in the DB yet: run a session first.[/]")
         return
 
     console.print(Rule(
-        f"[bold cyan]{'Range' if (since or until or lane) else 'Lifetime'} analytics[/] — "
+        f"[bold cyan]{'Range' if (since or until or lane) else 'Lifetime'} analytics[/]: "
         f"{lifetime['sessions_total']:,} sessions, "
         f"{lifetime['bets_total']:,} bets, {lifetime['wagered_total']:.8f} wagered"
         f"{wlabel}"))
@@ -4775,7 +4805,7 @@ def cmd_session_bets(session_id: int):
         return
     conn = _db_conn()
 
-    # session info — fetch all columns
+    # session info: fetch all columns
     sess = conn.execute("""
         SELECT id, started_at, ended_at,
                UPPER(currency), strategy, base_bet, multiplier,
@@ -4813,13 +4843,13 @@ def cmd_session_bets(session_id: int):
 
     pc = "green" if profit >= 0 else "red"
     ps = "+" if profit >= 0 else ""
-    wr = f"{wins/bets*100:.1f}%" if bets > 0 else "—"
+    wr = f"{wins/bets*100:.1f}%" if bets > 0 else "-"
     avg_pnl = profit / bets if bets > 0 else 0
     avg_c = "green" if avg_pnl >= 0 else "red"
     avg_s = "+" if avg_pnl >= 0 else ""
 
     # compute uptime
-    uptime_str = "—"
+    uptime_str = "-"
     try:
         t0 = datetime.fromisoformat(started) if started else None
         t1 = datetime.fromisoformat(ended) if ended else datetime.now()
@@ -4831,7 +4861,7 @@ def cmd_session_bets(session_id: int):
     except Exception:
         pass
 
-    console.print(Rule(f"[bold cyan]Session #{sid} — Full Stats[/]"))
+    console.print(Rule(f"[bold cyan]Session #{sid}: Full Stats[/]"))
     console.print(f"  [dim]Started:[/]       {(started or '?').replace('T', ' ')}")
     console.print(f"  [dim]Ended:[/]         {(ended or 'running').replace('T', ' ')}")
     console.print(f"  [dim]Uptime:[/]        {uptime_str}")
@@ -4931,7 +4961,7 @@ def cmd_session_bets(session_id: int):
 #  MAIN
 # ══════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════
-#  --config-show / --config-set  (v1.9.0 — WolfBet v2.25.0 / v2.28.3)
+#  --config-show / --config-set  (v1.9.0: WolfBet v2.25.0 / v2.28.3)
 # ══════════════════════════════════════════════════════════
 _CONFIG_SHOW_FIELDS = [
     ("currency",              "Betting currency"),
@@ -4990,17 +5020,17 @@ def _fmt_config_value(field: str, val) -> str:
             return f"{val:.8f}"
         return f"{val:.4f}".rstrip("0").rstrip(".") or "0"
     if isinstance(val, str) and len(val) > 60:
-        return val[:57] + "…"
+        return val[:57] + "..."
     return str(val)
 
 
 def cmd_config_show():
     """Print the saved config as a table. No wizard, no side effects."""
     if not load_config():
-        console.print("[yellow]No config saved yet — run the wizard first.[/]")
+        console.print("[yellow]No config saved yet: run the wizard first.[/]")
         console.print("[dim]  Try: python3 duckdice.py --setup-only[/]")
         sys.exit(1)
-    tbl = Table(title="DuckDice AutoBot — Current Config",
+    tbl = Table(title="DuckDice AutoBot: Current Config",
                 title_style="bold cyan", show_lines=False)
     tbl.add_column("Field",       style="bold yellow", no_wrap=True)
     tbl.add_column("Value",       style="cyan")
@@ -5017,7 +5047,7 @@ def cmd_config_show():
                       f"[dim]mode={oct(st.st_mode & 0o777)}  size={st.st_size}B[/]")
     except OSError:
         pass
-    # v1.10.0 (WolfBet v2.35.0 / v2.36.0) — lane count, split mode, overrides.
+    # v1.10.0 (WolfBet v2.35.0 / v2.36.0): lane count, split mode, overrides.
     raw = _read_config_raw() or {}
     n_lanes, mode = lanes_count(raw), lane_split(raw)
     console.print(f"\n[dim]Lanes:[/] [bold]{n_lanes}[/]  [dim]split:[/] [bold]{mode}[/]"
@@ -5027,7 +5057,7 @@ def cmd_config_show():
         if ov:
             parts = ", ".join(f"{k}={_fmt_config_value(k, v)}" for k, v in sorted(ov.items()))
             console.print(f"  [magenta]lane{lane}[/] overrides: {parts}")
-    console.print("[dim]Tweak with:[/] [cyan]python3 duckdice.py --config-set KEY=VALUE …[/]")
+    console.print("[dim]Tweak with:[/] [cyan]python3 duckdice.py --config-set KEY=VALUE ...[/]")
 
 
 def _parse_config_set_pairs(pairs: list) -> dict:
@@ -5057,7 +5087,7 @@ def cmd_config_set(pairs: list):
             console.print("[dim]  Set the DUCKDICE_API_KEY environment variable instead "
                           "(never in shell history / process args).[/]")
             sys.exit(2)
-    # v1.10.0 (WolfBet v2.35.0 / v2.36.0) — lanes=N, lane_split=MODE and
+    # v1.10.0 (WolfBet v2.35.0 / v2.36.0): lanes=N, lane_split=MODE and
     # laneK.key=value write the lanes block directly.
     try:
         pairs, per_lane, count, split = split_lane_pairs(pairs)
@@ -5076,7 +5106,7 @@ def cmd_config_set(pairs: list):
         console.print(f"[red]Invalid --config-set argument:[/] {e}")
         sys.exit(2)
     if not load_config():
-        console.print("[yellow]No config saved yet — run the wizard first.[/]")
+        console.print("[yellow]No config saved yet: run the wizard first.[/]")
         console.print("[dim]  Try: python3 duckdice.py --setup-only[/]")
         sys.exit(1)
     # DUCKDICE_API_KEY overrides the saved key on load; never persist it from env.
@@ -5106,10 +5136,10 @@ def cmd_config_set(pairs: list):
 
     unsafe = [k for k in parsed if k not in _LIVE_RELOAD_KEYS]
     if unsafe:
-        console.print(f"[yellow]Note:[/] {len(unsafe)} field(s) need a full restart to apply — "
+        console.print(f"[yellow]Note:[/] {len(unsafe)} field(s) need a full restart to apply: "
                       f"{', '.join(sorted(unsafe))}. Run [cyan]duckctl restart[/] when ready.")
     _signal_base_daemon()
-    # v1.10.0 (WolfBet v2.35.0) — the base config is shared: reload lanes 2..N too.
+    # v1.10.0 (WolfBet v2.35.0): the base config is shared: reload lanes 2..N too.
     n_lanes = _signal_lane_daemons(range(2, LANES_MAX + 1))
     if n_lanes:
         console.print(f"[dim]{n_lanes} more lane(s) reloaded live config.[/]")
@@ -5140,7 +5170,7 @@ def _encode_config_value(k, v):
 
 
 def _lane_override_changes(lane_pairs: list):
-    """v1.10.0 (WolfBet v2.35.0) — validate laneK.* pairs through the normal
+    """v1.10.0 (WolfBet v2.35.0): validate laneK.* pairs through the normal
     mutation path. Returns (sets, removals): sets = {key: encoded value},
     including derived fields (bet_value after multiplier); removals = keys
     whose override goes away (value default / unset / inherit)."""
@@ -5156,7 +5186,7 @@ def _lane_override_changes(lane_pairs: list):
     parsed = _parse_config_set_pairs(to_set) if to_set else {}
     check_lane_keys(parsed, _LANE_FORBIDDEN_KEYS)
     if not load_config():
-        raise ValueError("No config saved yet — run the wizard first.")
+        raise ValueError("No config saved yet: run the wizard first.")
     keys = list(_CONFIG_KEYS) + list(_STREAK_TUPLE_KEYS)
     before = {k: getattr(state, k, None) for k in keys}
     _apply_mutation(parsed)
@@ -5188,9 +5218,9 @@ def _cmd_config_set_lanes(per_lane: dict, count, split=None) -> int:
     Nothing is written when any part is refused."""
     raw = _read_config_raw()
     if raw is None:
-        console.print("[yellow]No config saved yet — run the wizard first.[/]")
+        console.print("[yellow]No config saved yet: run the wizard first.[/]")
         return 1
-    # v1.10.0 (L7) — the faucet balance can't be split between lanes.
+    # v1.10.0 (L7): the faucet balance can't be split between lanes.
     refusal = _faucet_lanes_conflict(count if count is not None else lanes_count(raw),
                                      raw.get("faucet"))
     if refusal and count is not None:
@@ -5242,13 +5272,13 @@ def _cmd_config_set_lanes(per_lane: dict, count, split=None) -> int:
         console.print(f"[dim]Start lanes 2..{count} with [cyan]python3 duckdice.py --daemon --lane K[/] "
                       "(restart running lanes so each recomputes its budget share).[/]")
     elif split is not None:
-        console.print("[dim]lane_split applies on the next lane start — run "
+        console.print("[dim]lane_split applies on the next lane start: run "
                       "[cyan]duckctl restart[/].[/]")
     return 0
 
 
 # ══════════════════════════════════════════════════════════
-#  RETENTION  (v1.9.0 — WolfBet v2.26.0)
+#  RETENTION  (v1.9.0: WolfBet v2.26.0)
 # ══════════════════════════════════════════════════════════
 def cmd_cleanup(days=None):
     """Purge bet rows of sessions older than N days; session aggregates are kept."""
@@ -5294,7 +5324,7 @@ def _startup_purge():
 
 
 # ══════════════════════════════════════════════════════════
-#  --benchmark / --diagnose  (v1.9.0 — WolfBet v2.26.1)
+#  --benchmark / --diagnose  (v1.9.0: WolfBet v2.26.1)
 # ══════════════════════════════════════════════════════════
 def _bench_client_session():
     """A separate HTTP session per benchmark client (like separate lane
@@ -5305,7 +5335,7 @@ def _bench_client_session():
 
 
 def _bench_lanes(n: int, lanes: int) -> dict:
-    """v1.10.0 (WolfBet v2.35.0) — `lanes` concurrent clients each fire `n`
+    """v1.10.0 (WolfBet v2.35.0): `lanes` concurrent clients each fire `n`
     read-only GET /bot/stats/{SYMBOL}. Returns {"rps", "p50", "ok", "total", "s429"}."""
     url = _stats_url()
     lock = threading.Lock()
@@ -5339,12 +5369,12 @@ def _bench_lanes(n: int, lanes: int) -> dict:
 
 
 def cmd_benchmark_lanes(n: int, lanes: int):
-    """v1.10.0 (WolfBet v2.35.0) — probe 1..N concurrent clients and recommend
+    """v1.10.0 (WolfBet v2.35.0): probe 1..N concurrent clients and recommend
     a lane count (read-only, no bets)."""
     lanes = max(2, min(LANES_MAX, int(lanes)))
     console.print(f"[dim]Lane benchmark: 1..{lanes} concurrent clients × {n} × "
                   f"GET /bot/stats/{state.currency.upper()}?api_key={_mask_key(state.api_key)} "
-                  f"(read-only, no bets, proxy={mask_proxy(state.proxy)}) …[/]")
+                  f"(read-only, no bets, proxy={mask_proxy(state.proxy)}) ...[/]")
     rows = {k: _bench_lanes(n, k) for k in range(1, lanes + 1)}
     tbl = Table(title="Concurrent clients", title_style="bold cyan")
     for col in ("lanes", "req/s", "×1 lane", "p50 ms", "ok", "429"):
@@ -5372,14 +5402,14 @@ def cmd_benchmark(n=None, lanes=None):
     n = 20 if n is None else int(n)
     n = max(3, min(200, n))
     if not load_config():
-        console.print("[red]No config saved yet — run the wizard first.[/]")
+        console.print("[red]No config saved yet: run the wizard first.[/]")
         sys.exit(1)
     if lanes and int(lanes) > 1:
         cmd_benchmark_lanes(n, lanes)
         return
     url = _stats_url()
     console.print(f"[dim]Benchmarking {n} × GET /bot/stats/{state.currency.upper()}"
-                  f"?api_key={_mask_key(state.api_key)} (proxy={mask_proxy(state.proxy)}) …[/]")
+                  f"?api_key={_mask_key(state.api_key)} (proxy={mask_proxy(state.proxy)}) ...[/]")
     samples, statuses, failures = [], [], 0
     for _ in range(n):
         t0 = time.time()
@@ -5448,7 +5478,7 @@ def cmd_diagnose():
         eff_raw = eff_ref / tmax * 100.0
         eff_display = ">100%" if eff_raw > 100.0 else f"{eff_raw:.0f}%"
     else:
-        eff_display = "—"
+        eff_display = "-"
 
     lines = [
         f"[dim]Game:[/] [cyan]dice[/]  ·  [dim]Strategy:[/] [cyan]{strategy}[/]",
@@ -5494,18 +5524,18 @@ def cmd_diagnose():
                       "[cyan]python3 duckdice.py --config-set delay=0[/] for max throughput.")
     elif top_name == "CLI overhead" and overhead > 30:
         if db_mode == "sync":
-            advice.append("• CLI overhead high AND db_write_mode=sync — flip to async: "
+            advice.append("• CLI overhead high AND db_write_mode=sync: flip to async: "
                           "[cyan]python3 duckdice.py --config-set dbmode=async[/]")
         elif dbw_fb == 0 and dbw_hwm < 100:
             advice.append("• CLI overhead is high on this host.")
-            advice.append("  DB writer is healthy — overhead is likely shared-tenancy CPU/disk "
+            advice.append("  DB writer is healthy: overhead is likely shared-tenancy CPU/disk "
                           "jitter (VPS silicon), not a fixable code issue.")
         else:
             advice.append("• CLI overhead is high. Check disk I/O (DB writes) and CPU load "
                           "on the daemon host.")
     if dbw_fb > 0:
         advice.append(f"• DB writer queue overflowed {dbw_fb} times "
-                      "(async writer is saturating — check disk perf).")
+                      "(async writer is saturating: check disk perf).")
     if not advice:
         advice.append("• Nothing obvious. Session is running near its natural ceiling.")
 
@@ -5520,7 +5550,7 @@ def _load_and_connect():
     if not load_config():
         console.print("[red]No saved config found. Run without --resume first.[/]")
         sys.exit(1)
-    console.print("[dim]Loading saved config…[/]")
+    console.print("[dim]Loading saved config...[/]")
     try:
         balances = api_get_balances()
         for b in balances:
@@ -5531,7 +5561,7 @@ def _load_and_connect():
                 state.highest_balance = bal
                 state.lowest_balance  = bal
                 break
-        console.print(f"[green]Resumed — {state.strategy} on {state.currency.upper()} "
+        console.print(f"[green]Resumed: {state.strategy} on {state.currency.upper()} "
                       f"@ {state.base_bet:.8f} base bet[/]")
     except Exception as e:
         detail = f": {_redact(e)}" if APP_ENV != "production" else ""
@@ -5613,7 +5643,7 @@ def main():
     if args.daemon:
         args.resume = True
 
-    # v1.10.0 (WolfBet v2.35.0) — lane identity first: every command below
+    # v1.10.0 (WolfBet v2.35.0): lane identity first: every command below
     # (status, monitor, stop, diagnose, the daemon itself) then reads / writes
     # this lane's state + pid files.
     try:
@@ -5698,7 +5728,7 @@ def main():
             else:
                 console.print("[red]No API key found. Run wizard first.[/]")
                 sys.exit(1)
-        console.print(f"[green]Loaded preset '{args.preset}' — {state.strategy} on "
+        console.print(f"[green]Loaded preset '{args.preset}': {state.strategy} on "
                       f"{state.currency.upper()} @ {state.base_bet:.8f}[/]")
         # fetch fresh balance
         try:
@@ -5721,9 +5751,9 @@ def main():
     else:
         setup_wizard()
 
-    _startup_purge()   # v1.9.0 — WolfBet v2.26.0 retention
+    _startup_purge()   # v1.9.0: WolfBet v2.26.0 retention
 
-    # v1.10.0 (L7) — faucet can't run with parallel lanes. The saved lanes
+    # v1.10.0 (L7): faucet can't run with parallel lanes. The saved lanes
     # block counts on every start path (a --preset run loads no config).
     raw_cfg = _read_config_raw()
     if raw_cfg is not None:
@@ -5735,7 +5765,7 @@ def main():
         logger.error("START REFUSED: %s", refusal)
         sys.exit(2)
 
-    # v1.10.0 (WolfBet v2.35.0) — split budget; lane K>1 staggers its first bet.
+    # v1.10.0 (WolfBet v2.35.0): split budget; lane K>1 staggers its first bet.
     _init_lane_budget()
     if state.lane > 1:
         time.sleep((state.lane - 1) * 2.0)
@@ -5767,7 +5797,7 @@ def main():
     # ── Signal handlers ───────────────────────────────────
     def _shutdown(sig, frame):
         state.running = False
-        state.status  = "Interrupted — saving session…"
+        state.status  = "Interrupted: saving session..."
         logger.warning("SESSION END (signal)  bets=%d  profit=%+.8f  balance=%.8f",
                     state.total_bets, state.profit, state.current_balance)
         _stop_bet_writer(timeout=5.0)
@@ -5808,7 +5838,7 @@ def main():
     threading.Thread(target=_retention_worker, daemon=True, name="Retention").start()
 
     # ══════════════════════════════════════════════════════
-    #  DAEMON MODE — no TUI, just bet in background
+    #  DAEMON MODE: no TUI, just bet in background
     # ══════════════════════════════════════════════════════
     if args.daemon:
         console.print(f"[bold green]Daemon started[/]  PID={os.getpid()}  Session #{state.session_id}")
@@ -5830,7 +5860,7 @@ def main():
         return
 
     # ══════════════════════════════════════════════════════
-    #  TUI MODE — interactive dashboard (direct ANSI rendering)
+    #  TUI MODE: interactive dashboard (direct ANSI rendering)
     # ══════════════════════════════════════════════════════
     t_input = threading.Thread(target=input_handler, daemon=True, name="InputHandler")
     t_input.start()
@@ -5860,7 +5890,7 @@ def main():
         sys.stdout.flush()
         time.sleep(1.0)
     finally:
-        # Restore terminal — order matters
+        # Restore terminal: order matters
         sys.stdout.write("\033[?25h")    # show cursor
         sys.stdout.write("\033[?1049l")  # leave alt screen
         sys.stdout.write("\033[0m")      # reset colors/attrs

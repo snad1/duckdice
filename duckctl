@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# DuckDice AutoBot — Unified Management Command v3.2
-# Wrapped in { } so bash reads entire script before executing —
+# DuckDice AutoBot: Unified Management Command v3.2
+# Wrapped in { } so bash reads entire script before executing -
 # prevents corruption when cmd_update replaces this file mid-run.
 {
 set -euo pipefail
@@ -17,7 +17,7 @@ SCRIPT_NAME="duckctl"
 
 usage() {
     echo ""
-    echo "  duckctl — DuckDice AutoBot Manager v3.2"
+    echo "  duckctl: DuckDice AutoBot Manager v3.2"
     echo ""
     echo "  CLI BOT:"
     echo "    duckctl setup       Run wizard to configure"
@@ -66,7 +66,7 @@ usage() {
 
 # ── CLI bot commands ──────────────────────────────────
 cmd_setup() {
-    echo "Running setup wizard…"
+    echo "Running setup wizard..."
     "$PYTHON" "$BOT" --setup-only
 }
 
@@ -183,10 +183,10 @@ cmd_presets() {
 cmd_update() {
     # Pull latest from git if inside a repo
     if git rev-parse --is-inside-work-tree &>/dev/null; then
-        echo "Pulling latest from git…"
+        echo "Pulling latest from git..."
         git pull --ff-only || { echo "Git pull failed. Resolve manually."; exit 1; }
     fi
-    echo "Updating bot files…"
+    echo "Updating bot files..."
     if [ ! -f "duckdice.py" ]; then
         echo "No duckdice.py in current directory."
         exit 1
@@ -214,12 +214,14 @@ cmd_update() {
         echo "shared/ library updated."
     fi
 
-    # Update casino-shared pip package
-    if [ -f "$INSTALL_DIR/venv/bin/pip" ]; then
-        "$INSTALL_DIR/venv/bin/pip" install --force-reinstall --no-cache-dir --quiet \
-            "casino-shared @ git+https://github.com/snad1/casino-shared.git" 2>/dev/null && \
-            echo "casino-shared pip package updated." || \
-            echo "casino-shared pip update skipped (network issue)."
+    # Install the pinned requirements, casino-shared included
+    if [ -f "$INSTALL_DIR/venv/bin/pip" ] && [ -f "$INSTALL_DIR/requirements.txt" ]; then
+        if "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade -r "$INSTALL_DIR/requirements.txt"; then
+            echo "Requirements installed (pinned casino-shared)."
+        else
+            echo "✗ Requirements install failed; stopping before the restart." >&2
+            exit 1
+        fi
     fi
 
     # Self-update: copy this script to its installed location
@@ -311,9 +313,9 @@ cmd_tg() {
             if [ -f "$ENV_FILE" ]; then
                 TOKEN=$(grep -E "^DUCKDICE_TG_TOKEN=" "$ENV_FILE" | cut -d= -f2- | tr -d ' ')
                 if [ -n "$TOKEN" ]; then
-                    echo "  Token: ${TOKEN:0:10}…(set)"
+                    echo "  Token: ${TOKEN:0:10}...(set)"
                 else
-                    echo "  Token: NOT SET — run: duckctl tg env"
+                    echo "  Token: NOT SET: run: duckctl tg env"
                 fi
             else
                 echo "  .env: NOT FOUND"
@@ -328,7 +330,7 @@ cmd_tg() {
         env)
             if [ ! -f "$ENV_FILE" ]; then
                 cat > "$ENV_FILE" << 'INNEREOF'
-# DuckDice AutoBot — Environment
+# DuckDice AutoBot: Environment
 DUCKDICE_TG_TOKEN=
 DUCKDICE_TG_DATA=~/.duckbot_tg
 INNEREOF
@@ -344,7 +346,7 @@ INNEREOF
 
 # ── All-services commands ────────────────────────────
 cmd_start_all() {
-    echo "Starting all services…"
+    echo "Starting all services..."
     cmd_start 2>/dev/null || true
     cmd_tg start 2>/dev/null || true
     echo ""
@@ -352,7 +354,7 @@ cmd_start_all() {
 }
 
 cmd_stop_all() {
-    echo "Stopping all services…"
+    echo "Stopping all services..."
     systemctl --user stop "$SERVICE" 2>/dev/null || true
     systemctl --user stop "$TG_SERVICE" 2>/dev/null || true
     echo "All services stopped."
@@ -361,7 +363,7 @@ cmd_stop_all() {
 cmd_status_all() {
     echo ""
     echo "╔══════════════════════════════════════════╗"
-    echo "║   DuckDice AutoBot — Service Status       ║"
+    echo "║   DuckDice AutoBot: Service Status       ║"
     echo "╚══════════════════════════════════════════╝"
     echo ""
 
@@ -434,7 +436,7 @@ cmd_web() {
             ;;
         update)
             if [ -d "web" ]; then
-                echo "Updating web app files…"
+                echo "Updating web app files..."
                 mkdir -p "$WEB_DIR/web"
                 cp -r web/* "$WEB_DIR/web/" 2>/dev/null || true
                 [ -f "web/requirements.txt" ] && cp web/requirements.txt "$WEB_DIR/requirements.txt"

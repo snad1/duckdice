@@ -1,8 +1,31 @@
 # Changelog
 
+## Security hotfixes: web, Telegram and limits (2026-11-15)
+
+### Web admin
+- `DUCKDICE_WEB_SECRET_KEY` and `DUCKDICE_WEB_ADMIN_PASS` must be non-default (32+ bytes, 12+ chars); the app exits before binding.
+- The installer generates the secret, prompts for or generates the password, writes `.env` with `printf` at 0600, refuses a weak existing `.env`, and always binds uvicorn to `127.0.0.1`.
+- Login lockout and single-use Telegram links are wired through the shared auth router.
+- Every `/api/users/{user_id}/...` route uses `require_user_access`.
+- `web/bot_db.py` exports the bound `_connect_ro(user_id)`, so the live session socket resolves.
+- The admin user page renders this service's secret keys as `hidden`.
+
+### Telegram
+- `/update` answers only to `TG_OWNER_ID`, with no fallback id and a startup warning when it is missing; the launcher is an argv list for `systemd-run` with validated paths and a 0600 log under the data dir.
+- `/set` and `/tweak` reject `nan` and `inf` for every numeric parameter, and the CLI config-set path uses the same check.
+
+### Updates
+- `duckctl update` installs the pinned requirements and stops when the install fails.
+
+### Log redaction and the minimum-bet raise
+- The Telegram log handler uses `RedactingFormatter`, every engine registers its key, and technical error text is redacted. `install.sh` writes `.env` 0600 and installs the repo's `duckctl` instead of its own stale copy.
+- A 422 minimum bet is accepted only when it is finite, positive, at most 10x the configured base bet and at most a quarter of the balance; otherwise the bot stops and says so. The TG engine keeps the learned minimum as a floor and checks the raise against the balance.
+
+**Version**: see the module constants; `casino-shared` pinned to the dashboard branch.
+
 ## CLI v1.12.0 + TG v1.10.0 — Run-wide profit increment (2026-11-15)
 
-Mirrors WolfBet CLI v2.37.0 (`profit_increment_scope`, `0b7e71a`). The increment only measured the current session and the milestone reset every recurring cycle, so large thresholds were never reached with many short sessions. Helpers come from `shared.core.run_increment` (casino-shared 0.3.0, E9-S1).
+Mirrors WolfBet CLI v2.37.0 (`profit_increment_scope`, `0b7e71a`). The increment only measured the current session and the milestone reset every recurring cycle, so large thresholds were never reached with many short sessions. Helpers come from `shared.core.run_increment` (casino-shared 0.3.0,).
 
 - **Scope** — `profit_increment_scope` (alias `piscope`): `session` (default, unchanged) measures the session's profit and its milestone resets each cycle; `run` measures the total since the run started and keeps the milestone across sessions. CLI: wizard asks after the increment prompts, `--config-set piscope=session|run` validates (exit 2) and needs a restart, `--config-show` lists it. TG: `/set piscope`, `/tweak piscope` (saved, applies at the next start), `/config`.
 - **Run** — CLI per lane `~/.duckdice_run.json` / `.laneK.json` (env `DUCKDICE_RUN_PATH`), TG per user `run.json` next to the user DB: `{first_session, started_at, bumps}`. The finished sessions' profit is the DB sum (`sessions`, lane-filtered in the CLI); the current session is added. On start `base_bet = config base + bumps × increment` (never below a learned 422 minimum in the CLI; the TG bot keeps no minimum), next milestone `(bumps + 1) × threshold`. A run file past the DB's last session starts a new run. A recurring restart carries the bumped base and its bump count, so the bumps are never added twice.
@@ -17,7 +40,7 @@ Mirrors WolfBet CLI v2.37.0 (`profit_increment_scope`, `0b7e71a`). The increment
 
 ## CLI v1.11.0 — Lane split minimum bet (2026-11-15)
 
-Completes WolfBet CLI v2.36.0 (`lane_split`, `6174b96`) with the duckdice adapt from backlog Epic 9 (E9-S6). The rest of v2.36.0 shipped in 1.10.0. Replays goated CLI v1.11.0 (E9-S2). TG unchanged.
+Completes WolfBet CLI v2.36.0 (`lane_split`, `6174b96`) with the duckdice adapt from backlog Epic 9. The rest of v2.36.0 shipped in 1.10.0. Replays goated CLI v1.11.0. TG unchanged.
 
 - **Minimum bet** — DuckDice has no fixed minimum: the CLI learns it per lane from a 422 "minimum bet" reply (`state.min_bet`). In `bet` / `both`, a split `base_bet` or `basebet_pct` bet below that learned minimum now stays full, with a warning in the log. Before, a split `basebet_pct` bet was divided and then raised to the minimum. Same on load and on SIGHUP reload; an untouched full bet is still saved as is. A lane's own `base_bet` override is never divided. Until a 422 is seen there is no minimum, so the split divides as in 1.10.0 (a split that rounds to 0 still stays full). An unsplit `basebet_pct` bet below the learned minimum is still raised to it. Uses `lane_config(..., min_bet)` and `split_base_bet` from casino-shared 0.3.0.
 - **No default change** — duckdice 1.10.0 already shipped `lane_split=none` as the default, so lanes never had the always-on v2.35.0 budget guard here. The budget stop applies only with `lane_split=budget` or `both`, as before.
@@ -28,7 +51,7 @@ Completes WolfBet CLI v2.36.0 (`lane_split`, `6174b96`) with the duckdice adapt 
 
 ## CLI v1.10.0 — Parallel lanes (2026-11-14)
 
-Mirrors WolfBet CLI v2.35.0 (parallel lanes) and v2.36.0 (`lane_split`); where the two differ, v2.36.0 code wins. Lane helpers come from `shared.core.lanes` (casino-shared E1-S5). Replays goated CLI v1.10.0 (E5-S6). TG unchanged.
+Mirrors WolfBet CLI v2.35.0 (parallel lanes) and v2.36.0 (`lane_split`); where the two differ, v2.36.0 code wins. Lane helpers come from `shared.core.lanes` (casino-shared). Replays goated CLI v1.10.0. TG unchanged.
 
 - **Lanes** — N independent bot processes on one account: `duckdice.py --daemon --lane K` (1–10). Each lane has its own session, chain, counters, stops, pauses and recurring / streak-reset cycle. Config file and stats DB are shared. Lane 1 keeps the classic state / pid paths, systemd unit and config writes; lane K > 1 uses `~/.duckdice_autobot_live.laneK.json` / `~/.duckdice_autobot.laneK.pid` (or `.laneK` on the `DUCKDICE_*_PATH` values) and logs with a `[LK]` prefix (API key still redacted). `--lane K` is applied before any command, so `--status` / `--monitor` / `--stop` / `--diagnose` act on that lane. Lane K's first bet waits `(K−1)·2 s`.
 - **DB** — new `sessions` rows carry `lane`.
@@ -57,7 +80,7 @@ Mirrors WolfBet CLI v2.17.0 and v2.30.3–v2.30.5 (metrics), v2.18.0 (wizard Ste
 - **Monitor** — footer hint line and `Keys:` banner; `S` stops through `systemctl --user stop duckdice` when the daemon runs in `duckdice.service`, else SIGTERM.
 - **Fix: API key leaks.** DuckDice puts the key in the URL query (`?api_key=`), and a failed request quoted it in the log, `last_error` (state file, `--status`, dashboard) and connect errors. A redacting log formatter (tracebacks too) and `_redact` on errors now mask it.
 - **Fix: dead `--status` "Rate Limit" row** (read `rate_remaining`, which nothing wrote) removed.
-- N/A: pipelining, the rate-limit-header / `/auto/start` quota rows, auto-bet UUID clearing, `bet_value` / HTTP 422 derivation from WolfBet. Parallel lanes and `--benchmark --lanes` are E5-S10.
+- N/A: pipelining, the rate-limit-header / `/auto/start` quota rows, auto-bet UUID clearing, `bet_value` / HTTP 422 derivation from WolfBet. Parallel lanes and `--benchmark --lanes` are.
 - Tests: `tests/test_wolfbet_sync_e5.py` (108). `tests/conftest.py` now patches `_http_session` and fails any unpatched live request; `test_portability_v1.py` pins 1.9.0.
 
 `VERSION` `1.8.0` → `1.9.0`.
@@ -69,7 +92,7 @@ Mirrors WolfBet CLI v2.23.0 / v2.31.0 (`--analytics`, date-windowed), v2.30.9 (w
 - **Fix: time-of-day window** — `--since "2026-11-13 14:00"` matched the whole day (`' ' < 'T'`). The window now comes from `shared.core.stats.stats_date_window`: the space becomes `T`, a bare `--until` date runs to `23:59:59.999999`, and a bad bound prints `Invalid --since/--until "…"` and no rows. The local `_stats_date_window` is gone.
 - **`--stats` totals** — `Sessions: N (first → last)`, `Time Span … Bet Time …` (pauses between cycles count in the span, not in bet time), `Wins/Session` and `Losses/Session` (max / avg). All follow the window.
 - **`--analytics [--since --until]`** (new, also `duckctl analytics`) — Overall panel (time range / span / bet time, sessions in profit / loss, win rate, wagered, P/L, best / worst session), By game, By strategy, Top 5 best / worst sessions. Reads only the `sessions` table. Faucet mode is not recorded on sessions or bets, so By game is a single "Dice" row.
-- **`--lane K`** on `--stats` / `--analytics` filters `sessions.lane` (rows from before lanes count as lane 1); session headers show `[LK]` when K > 1; analytics shows "By lane" when the window holds more than one lane. `core/database.migrate_db` (CLI and TG) adds `sessions.lane` to existing DBs (`ensure_sessions_lane`); `--stats` / `--analytics` run the migration first. Until lanes run (E5-S10) every new row is lane 1.
+- **`--lane K`** on `--stats` / `--analytics` filters `sessions.lane` (rows from before lanes count as lane 1); session headers show `[LK]` when K > 1; analytics shows "By lane" when the window holds more than one lane. `core/database.migrate_db` (CLI and TG) adds `sessions.lane` to existing DBs (`ensure_sessions_lane`); `--stats` / `--analytics` run the migration first. Until lanes run every new row is lane 1.
 - **Run time** — dashboard and `--monitor` headers show `Run …` from `run_uptime_sec` (whole run, across cycles; absent for old state files); `--status` adds `Running for`.
 - N/A: none.
 - Tests: `tests/test_wolfbet_sync_e4.py` (27). `test_portability_v1.py` now calls the shared window helper and pins 1.8.0.

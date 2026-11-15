@@ -1,4 +1,4 @@
-"""WolfBet sync E5-S5: duckdice CLI observability and tooling.
+"""WolfBet sync: duckdice CLI observability and tooling.
 
 Mirrors WolfBet v2.17.0 / v2.30.3-v2.30.5 (metrics), v2.26.1 (--benchmark /
 --diagnose), v2.26.0 (proxy, purge_days, --cleanup), v2.27.0 (async bet
@@ -558,9 +558,9 @@ def test_risky_chain_depth_warning():
 
 def test_wizard_has_step_5b_before_presets():
     src = inspect.getsource(cg.setup_wizard)
-    assert "Step 5b / 7 — Advanced session tuning (optional)" in src
+    assert "Step 5b / 7: Advanced session tuning (optional)" in src
     assert "step_stop_conditions, step_advanced_tuning, step_preset" in src
-    assert "Heads-up — review before starting" in src
+    assert "Heads-up: review before starting" in src
     assert "pipeline_depth" not in src
 
 
@@ -575,7 +575,7 @@ def test_parse_config_set_pairs():
 @pytest.mark.parametrize("field, val, expect", [
     ("max_profit", None, "off"), ("recurring", True, "on"), ("streak_delay_loss", (3, 0.5), "3:0.5"),
     ("streak_delay_win", (0, 0.0), "off"), ("base_bet", 0.01, "0.01000000"), ("bet_delay", 0.25, "0.25"),
-    ("custom_rules_text", "x" * 80, "…"),
+    ("custom_rules_text", "x" * 80, "..."),
 ])
 def test_fmt_config_value(field, val, expect):
     assert expect in cg._fmt_config_value(field, val)

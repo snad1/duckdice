@@ -1,4 +1,4 @@
-"""Test sandbox + fake casino fixtures (E0-S2).
+"""Test sandbox + fake casino fixtures.
 
 Module top runs before any test imports `duckdice` or `tg`: path constants
 are bound at import from DUCKDICE_* / DUCKDICE_TG_DATA / HOME, so they
@@ -24,6 +24,8 @@ for _p in (_ROOT, _CASINO):
 _SANDBOX_HOME = tempfile.mkdtemp(prefix="duckdice_home_")
 os.environ["HOME"] = _SANDBOX_HOME
 os.environ["APP_ENV"] = "testing"
+os.environ.setdefault("DUCKDICE_WEB_SECRET_KEY", "test-secret-key-for-the-suite-12345678")
+os.environ.setdefault("DUCKDICE_WEB_ADMIN_PASS", "test-admin-pass-1234")
 os.environ.pop("DUCKDICE_API_BASE", None)
 os.environ["DUCKDICE_TG_DATA"] = os.path.join(_SANDBOX_HOME, "tg")
 os.environ["DUCKDICE_LOG_DIR"] = os.path.join(_SANDBOX_HOME, "logs")
@@ -48,7 +50,7 @@ def sleeps():
 def _sandbox(tmp_path, monkeypatch, sleeps):
     for name in ("DB_PATH", "CONFIG_PATH", "STATE_PATH", "PID_PATH", "PRESET_PATH", "RUN_PATH"):
         monkeypatch.setattr(dd, name, str(tmp_path / f"cli_{name.lower()}"))
-    # v1.10.0 — lane paths derive from the lane-1 (base) state / pid paths.
+    # v1.10.0: lane paths derive from the lane-1 (base) state / pid paths.
     monkeypatch.setattr(dd, "_BASE_STATE_PATH", dd.STATE_PATH)
     monkeypatch.setattr(dd, "_BASE_PID_PATH", dd.PID_PATH)
     monkeypatch.setattr(tg_database, "DATA_DIR", str(tmp_path / "tg"))
@@ -80,7 +82,7 @@ def cli_state(fake_casino, monkeypatch):
         api = fake_casino.requests_api()
         monkeypatch.setattr(dd.requests, "get", api.get)
         monkeypatch.setattr(dd.requests, "post", api.post)
-        # v1.9.0 — the CLI calls the API through `_http_session` (proxy support).
+        # v1.9.0: the CLI calls the API through `_http_session` (proxy support).
         monkeypatch.setattr(dd._http_session, "get", api.get)
         monkeypatch.setattr(dd._http_session, "post", api.post)
         dd.init_db()

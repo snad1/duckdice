@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DuckDice Telegram Bot — entry point and Application wiring."""
+"""DuckDice Telegram Bot: entry point and Application wiring."""
 
 import asyncio
 import atexit
@@ -52,7 +52,7 @@ def _save_once():
     save_resume_state()
 
 def _signal_handler(signum, frame):
-    """Handle SIGTERM/SIGINT — save resume state before exit."""
+    """Handle SIGTERM/SIGINT: save resume state before exit."""
     logger.info("Received signal %d, saving state...", signum)
     _save_once()
     sys.exit(0)
@@ -70,6 +70,9 @@ def main():
     atexit.register(_save_once)
     logger.info("DuckDice Telegram Bot v%s starting...", VERSION)
     logger.info("Data dir: %s", DATA_DIR)
+    owner = os.environ.get("TG_OWNER_ID", "").strip()
+    if not owner.isdigit():
+        logger.warning("TG_OWNER_ID is unset or not numeric: /update is disabled for everyone")
 
     # Register commands with Telegram on startup (shows in / menu)
     async def post_init(application):
@@ -161,7 +164,7 @@ def main():
     async def _error_handler(update, context: ContextTypes.DEFAULT_TYPE):
         err = context.error
         if isinstance(err, RetryAfter):
-            logger.warning("Telegram flood control — retry in %ss", err.retry_after)
+            logger.warning("Telegram flood control: retry in %ss", err.retry_after)
         elif isinstance(err, (NetworkError, TimedOut)):
             logger.warning("Telegram network: %s", err)
         else:

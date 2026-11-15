@@ -1,7 +1,9 @@
-"""Configuration — environment variables, constants, tier definitions."""
+"""Configuration: environment variables, constants, tier definitions."""
 
 import os
 import logging
+
+from shared.tg.redact import RedactingFormatter
 
 # ── Environment ──────────────────────────────────────────
 APP_ENV    = os.environ.get("APP_ENV", "production")
@@ -22,6 +24,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+_root = logging.getLogger()
+for _handler in _root.handlers:
+    _handler.setFormatter(RedactingFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
 logger = logging.getLogger("duckbot")
 
 # Suppress noisy httpx request logs (Telegram polling etc)
