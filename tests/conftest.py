@@ -27,7 +27,7 @@ os.environ["APP_ENV"] = "testing"
 os.environ.pop("DUCKDICE_API_BASE", None)
 os.environ["DUCKDICE_TG_DATA"] = os.path.join(_SANDBOX_HOME, "tg")
 os.environ["DUCKDICE_LOG_DIR"] = os.path.join(_SANDBOX_HOME, "logs")
-for _name in ("DB_PATH", "CONFIG_PATH", "STATE_PATH", "PID_PATH", "PRESET_PATH"):
+for _name in ("DB_PATH", "CONFIG_PATH", "STATE_PATH", "PID_PATH", "PRESET_PATH", "RUN_PATH"):
     os.environ[f"DUCKDICE_{_name}"] = os.path.join(_SANDBOX_HOME, _name.lower())
 
 import duckdice as dd  # noqa: E402
@@ -46,7 +46,7 @@ def sleeps():
 
 @pytest.fixture(autouse=True)
 def _sandbox(tmp_path, monkeypatch, sleeps):
-    for name in ("DB_PATH", "CONFIG_PATH", "STATE_PATH", "PID_PATH", "PRESET_PATH"):
+    for name in ("DB_PATH", "CONFIG_PATH", "STATE_PATH", "PID_PATH", "PRESET_PATH", "RUN_PATH"):
         monkeypatch.setattr(dd, name, str(tmp_path / f"cli_{name.lower()}"))
     # v1.10.0 — lane paths derive from the lane-1 (base) state / pid paths.
     monkeypatch.setattr(dd, "_BASE_STATE_PATH", dd.STATE_PATH)

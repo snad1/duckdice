@@ -28,6 +28,7 @@ from core.strategy import (
 from shared.core.session_rules import (
     clamp, RECURRING_DELAY_MAX, STREAK_RESET_DELAY_MIN,
 )
+from shared.core.run_increment import parse_scope, increment_on, OFF_VALUES as PI_OFF_VALUES
 from shared.core.stats import stats_date_window
 from .engine import BettingEngine, STREAK_RESET_REASON
 from .formatter import (
@@ -71,6 +72,20 @@ def _throttle_recurring(user_id: int, kind: str) -> bool:
 def _get_running(user_id: int) -> Dict[int, BettingEngine]:
     """Return {slot: engine} for running engines only."""
     return {s: e for s, e in active_engines.get(user_id, {}).items() if e.running}
+
+
+def _run_scope_on(config: dict) -> bool:
+    """True when this saved config runs the increment with the run-wide scope."""
+    return ((config.get("profit_increment_scope") or "session") == "run"
+            and increment_on(config.get("profit_increment"),
+                             config.get("profit_threshold")))
+
+
+def _run_scope_on_engine(engine) -> bool:
+    """True when a running engine holds a run-wide increment."""
+    return (getattr(engine, "profit_increment_scope", "session") == "run"
+            and increment_on(getattr(engine, "profit_increment", None),
+                             getattr(engine, "profit_threshold", None)))
 
 
 def _resolve_engine(user_id: int, args: list) -> tuple:
@@ -172,6 +187,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`milestoneprofit` \u2014 Notify every X profit (0=off)\n"
         "`profitthreshold` \u2014 Auto-raise base bet every X profit (`off` to disable)\n"
         "`profitincrement` \u2014 Amount to add to base bet (`off` to disable)\n"
+        "`piscope` \u2014 Profit increment scope: `session` (each session) or `run` (total since the run started)\n"
         "`proxy` \u2014 http://user:pass@ip:port or socks5://... (`off` to disable)\n"
         "`recurring` \u2014 Auto-restart on stop condition (`on`/`off`)\n"
         "`recurringdelay` \u2014 Seconds before restart (default 60, 5-86400)\n"
@@ -187,6 +203,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/bet \u2014 Start session\n"
         "/stop \u2014 Stop session (`/stop all` or `/stop 2`)\n"
         "/stop recurring \u2014 Cancel all recurring bets and stop sessions\n"
+        "/runreset \u2014 Clear the run-wide profit increment (asks to confirm)\n"
         "/tweak \u2014 Change settings on a running session\n"
         "/pause \u2014 Pause (`/pause all` or `/pause 2`)\n"
         "/resume \u2014 Resume (`/resume all` or `/resume 2`)\n"
@@ -466,7 +483,9 @@ async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pi = config.get("profit_increment")
         pt = config.get("profit_threshold")
         if pi and pt:
-            lines.append(f"Profit increment: `+{float(pi):.8f} every {float(pt):.8f} profit`")
+            scope = config.get("profit_increment_scope") or "session"
+            lines.append(f"Profit increment: `+{float(pi):.8f} every {float(pt):.8f} profit`"
+                         f" (scope: `{scope}`)")
 
         # Milestones
         ms = []
@@ -648,23 +667,18 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif param in ("milestoneprofit", "msprofit"):
             config["milestone_profit"] = float(value)
         elif param in ("profitthreshold", "pt"):
-            if value.lower() != "off":
-                val = float(value)
-                if val < 0:
-                    await update.message.reply_text("Profit threshold must be > 0 (or 'off').")
-                    return
-                config["profit_threshold"] = val
-            else:
-                config["profit_threshold"] = None
+            config["profit_threshold"] = _increment_amount(value)
         elif param in ("profitincrement", "pi"):
-            if value.lower() != "off":
-                val = float(value)
-                if val < 0:
-                    await update.message.reply_text("Profit increment must be >= 0 (or 'off').")
-                    return
-                config["profit_increment"] = val
-            else:
-                config["profit_increment"] = None
+            config["profit_increment"] = _increment_amount(value)
+        elif param in ("piscope", "profitincrementscope", "profit_increment_scope"):
+            try:
+                config["profit_increment_scope"] = parse_scope(value)
+            except ValueError:
+                await update.message.reply_text(
+                    "Profit increment scope must be `session` or `run`.",
+                    parse_mode="Markdown")
+                return
+            note = "Applies on the next start."
         elif param == "recurring":
             if value.lower() in ("on", "true", "yes", "1"):
                 config["recurring"] = True
@@ -794,6 +808,16 @@ async def cmd_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     min_delay = TIERS.get(tier, 1.0)
     config_delay = float(config.get("bet_delay") or 0)
     config["bet_delay"] = max(config_delay, min_delay)
+
+    # Run scope is one slot at a time: two slots would share (and race on) one run.
+    running = _get_running(user_id)
+    if running and (_run_scope_on(config)
+                    or any(_run_scope_on_engine(e) for e in running.values())):
+        await update.message.reply_text(
+            "Run-wide profit increment uses one slot at a time. Stop the running "
+            "session with /stop, or set `/set piscope session` to run several slots.",
+            parse_mode="Markdown")
+        return
 
     db_path = user_db_path(user_id)
     try:
@@ -989,8 +1013,14 @@ async def _notify_stop(chat_id: int, user_id: int, slot: int, reason: str, app):
             # Carry live /set changes to the streak-reset settings into the next cycle.
             for k in ("streak_reset_losses", "streak_reset_delay"):
                 config[k] = live_config.get(k)
+            # And the live profit increment scope + off values.
+            config["profit_increment"] = live_config.get("profit_increment")
+            config["profit_threshold"] = live_config.get("profit_threshold")
+            config["profit_increment_scope"] = live_config.get("profit_increment_scope")
         # Carry forward the current base_bet (profit increment may have raised it)
         config["base_bet"] = engine.base_bet
+        # The new engine must not add the bumps already inside that base bet.
+        config["_run_bumps_in_base"] = getattr(engine, "run_bumps", 0)
         label = "Streak reset" if is_streak_reset else "Recurring"
         await _safe_send(app,
             chat_id,
@@ -1014,6 +1044,15 @@ async def _notify_milestone(chat_id: int, data: dict, app):
 
 async def _notify_error(chat_id: int, message: str, app):
     await _safe_send(app, chat_id, f"⚠️ {message}", parse_mode="Markdown")
+
+
+def _increment_amount(value):
+    """A positive increment / threshold, or None for the off values (none / off / 0 / 0.0)."""
+    v = str(value).strip().lower()
+    if v in PI_OFF_VALUES:
+        return None
+    amount = float(v)          # ValueError → "Invalid value" reply
+    return amount if amount > 0 else None
 
 
 def _streak_reset_delay(config: dict) -> int:
@@ -1307,9 +1346,19 @@ async def cmd_tweak(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif param in ("milestonewins", "mswins"):
             changes["milestone_wins"] = int(value)
         elif param in ("profitincrement", "pi"):
-            changes["profit_increment"] = None if off else float(value)
+            changes["profit_increment"] = _increment_amount(value)
         elif param in ("profitthreshold", "pt"):
-            changes["profit_threshold"] = None if off else float(value)
+            changes["profit_threshold"] = _increment_amount(value)
+        elif param in ("piscope", "profitincrementscope", "profit_increment_scope"):
+            # No engine field: the scope is read from the saved config at the next start.
+            scope = parse_scope(value)
+            config = load_user_config(user_id)
+            config["profit_increment_scope"] = scope
+            save_user_config(user_id, config)
+            await update.message.reply_text(
+                f"Profit increment scope = `{scope}` (applies at the next start)",
+                parse_mode="Markdown")
+            return
         else:
             await update.message.reply_text(f"Unknown tweak param: `{param}`\nUse `/tweak` for options.", parse_mode="Markdown")
             return
@@ -1319,6 +1368,48 @@ async def cmd_tweak(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     result = await engine.mutate(changes)
     await update.message.reply_text(f"Tweaked slot {slot}: {result}", parse_mode="Markdown")
+
+
+# ── /runreset: clear the run-wide profit increment ───────
+def _run_file_path(user_id: int) -> str:
+    """The run file the engine uses for this user's sessions."""
+    return os.path.join(os.path.dirname(user_db_path(user_id)), "run.json")
+
+
+async def cmd_runreset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    running = _get_running(user_id)
+    slot = None
+    if len(running) > 1 and context.args:
+        try:
+            slot = int(context.args[0])
+        except ValueError:
+            slot = None
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Reset run", callback_data=f"runreset_confirm:{slot or 0}"),
+        InlineKeyboardButton("Cancel", callback_data="runreset_cancel"),
+    ]])
+    await update.message.reply_text(
+        "Reset the run-wide profit increment?\n"
+        "The bump counter and run start are cleared and the base bet drops back by "
+        "the bumps already made. The next session starts a new run.",
+        reply_markup=keyboard)
+
+
+async def _do_run_reset(user_id: int, slot):
+    s, engine = (slot, active_engines.get(user_id, {}).get(slot)) if slot else (None, None)
+    if engine is None:
+        running = _get_running(user_id)
+        if len(running) == 1:
+            s, engine = next(iter(running.items()))
+    if engine and engine.running:
+        engine.reset_run()
+        return f"Run reset: new run at session #{engine.session_id}."
+    try:
+        os.remove(_run_file_path(user_id))
+        return "Run reset: the next session starts a new run."
+    except OSError:
+        return "No run to reset."
 
 
 # ── /pause ───────────────────────────────────────────────
@@ -1553,7 +1644,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "noop":
         return
 
+    if query.data == "runreset_cancel":
+        try:
+            await query.edit_message_text("Run reset cancelled.")
+        except Exception:
+            pass
+        return
+
     action, slot = _parse_callback_slot(query.data)
+
+    if action == "runreset_confirm":
+        msg = await _do_run_reset(user_id, slot or None)
+        try:
+            await query.edit_message_text(msg)
+        except Exception:
+            pass
+        return
 
     # Resolve engine — use slot from callback, or auto-resolve single session
     def _get_engine():

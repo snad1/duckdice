@@ -1,5 +1,20 @@
 # Changelog
 
+## CLI v1.12.0 + TG v1.10.0 — Run-wide profit increment (2026-11-15)
+
+Mirrors WolfBet CLI v2.37.0 (`profit_increment_scope`, `0b7e71a`). The increment only measured the current session and the milestone reset every recurring cycle, so large thresholds were never reached with many short sessions. Helpers come from `shared.core.run_increment` (casino-shared 0.3.0, E9-S1).
+
+- **Scope** — `profit_increment_scope` (alias `piscope`): `session` (default, unchanged) measures the session's profit and its milestone resets each cycle; `run` measures the total since the run started and keeps the milestone across sessions. CLI: wizard asks after the increment prompts, `--config-set piscope=session|run` validates (exit 2) and needs a restart, `--config-show` lists it. TG: `/set piscope`, `/tweak piscope` (saved, applies at the next start), `/config`.
+- **Run** — CLI per lane `~/.duckdice_run.json` / `.laneK.json` (env `DUCKDICE_RUN_PATH`), TG per user `run.json` next to the user DB: `{first_session, started_at, bumps}`. The finished sessions' profit is the DB sum (`sessions`, lane-filtered in the CLI); the current session is added. On start `base_bet = config base + bumps × increment` (never below a learned 422 minimum in the CLI; the TG bot keeps no minimum), next milestone `(bumps + 1) × threshold`. A run file past the DB's last session starts a new run. A recurring restart carries the bumped base and its bump count, so the bumps are never added twice.
+- **Faucet** — DuckDice keeps no faucet flag on `sessions` and `state.profit` already counted faucet bets, so faucet sessions count in the run total exactly as they counted in session profit. No new column.
+- **TG one slot** — a user's sessions carry no slot, so run scope runs one slot at a time: `/bet` is refused while another slot runs when the saved config or a running session holds run scope.
+- **Off** — `pi` / `pt` = `none` / `off` / `0` / `0.0` (≤ 0) is fully off: no bumps, no run; the run file is removed at start or on live reload (CLI SIGHUP, TG `/tweak`). Re-enabling starts a fresh run at the current session.
+- **Display / reset** — CLI `--status` `Run Profit` row, monitor `RunMs`, state file fields; `--run-reset [--lane K]`. TG `/status` run line; `/runreset` with a confirm button. The user DB `sessions` schema is unchanged.
+- N/A: the WolfBet auto-bet UUID restart (no server auto-bet here; the bumped base applies to the next bet). `duckctl run-reset` / `reset` belongs to the ctl work.
+- Tests: `tests/test_wolfbet_sync_e10.py` (37). The CLI and TG versions in `test_portability_v1.py` move to 1.12.0 / 1.10.0.
+
+`VERSION` `1.11.0` → `1.12.0`; TG `VERSION` `1.9.0` → `1.10.0`.
+
 ## CLI v1.11.0 — Lane split minimum bet (2026-11-15)
 
 Completes WolfBet CLI v2.36.0 (`lane_split`, `6174b96`) with the duckdice adapt from backlog Epic 9 (E9-S6). The rest of v2.36.0 shipped in 1.10.0. Replays goated CLI v1.11.0 (E9-S2). TG unchanged.

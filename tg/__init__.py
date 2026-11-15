@@ -1,3 +1,3 @@
 """DuckDice Telegram Bot — Multi-tenant auto-betting via Telegram."""
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
