@@ -619,7 +619,7 @@ def test_config_set_never_persists_env_key(saved_config, out, monkeypatch):
 
 def test_config_set_restart_note_for_unsafe_keys(saved_config, out):
     saved_config()
-    cg.cmd_config_set(["basebet=0.02"])
+    cg.cmd_config_set(["lossmult=2.5"])
     assert "need a full restart" in out.getvalue()
     assert "Daemon not running" in out.getvalue()
 

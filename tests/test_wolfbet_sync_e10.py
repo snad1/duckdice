@@ -1,4 +1,4 @@
-"""WolfBet sync E10-S5: duckdice run-wide profit increment (CLI v1.12.0, TG v1.10.0).
+"""duckdice run-wide profit increment (CLI v1.12.0, TG v1.10.0).
 
 Mirrors WolfBet v2.37.0 (`profit_increment_scope`, `0b7e71a`): scope "run"
 measures the profit of the run's sessions (DB sum + current) and keeps the
@@ -260,6 +260,114 @@ def test_live_reload_increment_on_starts_run(monkeypatch, tmp_path):
     assert dd.state.run_first_session == 8
     assert _read_run(dd.RUN_PATH)["first_session"] == 8
 
+
+
+# ── the base the operator sets is the base it bets ───────
+def _bumped_daemon(monkeypatch, tmp_path, bumps=5, profit=0.12):
+    """A run-scope daemon on base 0.01 whose live base carries `bumps` bumps."""
+    s = _cfg("run")
+    s.base_bet_disk, s.base_bet_split, s.run_base_origin = 0.01, None, None
+    _live_cfg(monkeypatch, tmp_path, profit_increment=0.001, profit_threshold=0.05)
+    dd._attach_run(5)
+    s.run_bumps = bumps
+    s.base_bet = s.current_bet = round(0.01 + bumps * 0.001, 8)
+    s.profit = profit
+    dd._save_run()
+    return s
+
+
+def _edit_cfg(**vals):
+    data = json.loads(Path(dd.CONFIG_PATH).read_text())
+    data.update(vals)
+    Path(dd.CONFIG_PATH).write_text(json.dumps(data))
+
+
+def test_live_base_change_zeroes_bumps_and_reanchors(monkeypatch, tmp_path):
+    s = _bumped_daemon(monkeypatch, tmp_path)
+    _edit_cfg(base_bet=0.02)
+
+    applied = dd._reload_live_config()
+
+    assert "base_bet" in applied
+    assert s.base_bet == pytest.approx(0.02) and s.current_bet == pytest.approx(0.02)
+    assert s.run_bumps == 0 and s.run_base_origin == pytest.approx(0.02)
+    assert s.next_profit_milestone == pytest.approx(0.15)     # above run profit 0.12
+    run = _read_run(dd.RUN_PATH)
+    assert run["bumps"] == 0 and run["base"] == pytest.approx(0.02)
+
+
+def test_unrelated_reload_keeps_the_bumps(monkeypatch, tmp_path):
+    s = _bumped_daemon(monkeypatch, tmp_path)
+    _edit_cfg(max_loss=5.0)
+
+    applied = dd._reload_live_config()
+
+    assert "base_bet" not in applied
+    assert s.run_bumps == 5 and s.base_bet == pytest.approx(0.015)
+
+
+def test_base_change_without_a_run_only_sets_the_bet():
+    _cfg("session")
+    dd._rebase_run_for_base_change(0.02)
+    assert dd.state.base_bet == pytest.approx(0.02)
+    assert dd.state.current_bet == pytest.approx(0.02)
+    assert not os.path.exists(dd.RUN_PATH)
+
+
+def test_resume_drops_bumps_earned_on_another_base(db):
+    _seed([(3, 0.12, 1)])
+    Path(dd.RUN_PATH).write_text(json.dumps(
+        {"first_session": 3, "started_at": "x", "bumps": 4, "base": 0.02}))
+    _cfg("run")
+    dd._init_run()
+    assert dd.state.run_bumps == 0
+    assert dd.state.base_bet == pytest.approx(0.01)
+    assert dd.state.next_profit_milestone == pytest.approx(0.15)  # above run profit 0.12
+    assert _read_run(dd.RUN_PATH)["base"] == pytest.approx(0.01)
+
+
+def test_resume_applies_bumps_on_the_same_base(db):
+    _seed([(3, 0.12, 1)])
+    Path(dd.RUN_PATH).write_text(json.dumps(
+        {"first_session": 3, "started_at": "x", "bumps": 2, "base": 0.01}))
+    _cfg("run")
+    dd._init_run()
+    assert dd.state.run_bumps == 2
+    assert dd.state.base_bet == pytest.approx(0.012)
+
+
+def test_legacy_run_file_keeps_bumps_once_and_adopts_the_base(db):
+    _seed([(3, 0.12, 1)])
+    _write_run(dd.RUN_PATH, 3, bumps=2)
+    _cfg("run")
+    dd._init_run()
+    assert dd.state.run_bumps == 2
+    assert dd.state.run_base_origin == pytest.approx(0.01)
+    assert _read_run(dd.RUN_PATH)["base"] == pytest.approx(0.01)
+
+
+def test_config_show_reports_the_live_base(out, monkeypatch, tmp_path):
+    _live_cfg(monkeypatch, tmp_path, api_key="k" * 32)
+    monkeypatch.setattr(dd, "_monitor_read_state",
+                        lambda: {"pid": 4242, "base_bet": 0.015, "run_bumps": 5})
+    monkeypatch.setattr(dd, "_monitor_get_pid", lambda d: 4242)
+    dd.console.width = 250
+    dd.cmd_config_show()
+    assert "live 0.01500000" in out.getvalue() and "+5 bumps" in out.getvalue()
+
+
+def test_config_show_without_a_daemon_shows_the_file_only(out, monkeypatch, tmp_path):
+    _live_cfg(monkeypatch, tmp_path, api_key="k" * 32)
+    dd.cmd_config_show()
+    assert "live " not in out.getvalue()
+
+
+def test_ctl_start_reports_an_already_active_unit():
+    src = open(os.path.join(os.path.dirname(_HERE), "duckctl")).read()
+    start = src[src.index("cmd_start()"):src.index("cmd_stop()")]
+    assert "was_active" in start
+    assert "already running" in start
+    assert "duckctl restart" in start
 
 def test_run_reset_removes_files(out):
     for k in (1, 3):
