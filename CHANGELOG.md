@@ -1,5 +1,31 @@
 # Changelog
 
+## CLI v1.13.0 - exit reason, session export and offline backtest (2026-11-23)
+
+Mirrors WolfBet CLI v2.20.0 (export), v2.21.0 (backtest) and v2.37.1 (exit reason), as goated CLI v1.13.0 and cryptogames CLI v1.13.0 do. Dice only.
+
+### Why the bot stopped
+- The exit summary has a `Stop reason` row: the final status, or `-` when there is none.
+- The daemon logs `DAEMON EXIT  session=N  bets=B  profit=+P  reason=...` after the session is saved and before the last state write, so the saved `status` and the log agree and a stop is never a silent clean exit.
+
+### Export
+- `--export PATH [--export-session-id ID]` writes one session (default: the latest). A `.json` path gives `{"session": ..., "bets": [...]}`; anything else gives CSV with the session as `# key: value` lines over the bets table. Files are mode 0600.
+- `E` in the TUI exports the current session (default `~/duckdice-session-<id>.csv`).
+- `duckctl export PATH [SID]`.
+
+### Backtest
+- `--backtest --simulate N --seed S` bets virtually from the bet's own fields: win chance `bet_value` percent (`chance`), `over` is `isHigh`. The roll is a 0-100 percent roll, not duckdice's server number scale: `over` wins above 100 minus the chance, `under` below it; a win pays bet x (multiplier - 1). Results have `api_place_bet`'s shape (`bet`, `userBalance`), and the same seed gives the same result.
+- `--backtest --replay-session ID` replays a stored session's win / loss sequence with the current strategy's bet sizes and payout.
+- Config comes from `--preset NAME`, else the saved config, else the bot defaults (Martingale, 2.01x, over). The run is in memory on a 1.0 sandbox balance: no API call, no balance lookup, no DB write, no run file. With faucet mode on, the run is still virtual and touches no real faucet balance (the header says so).
+- The live loop's stats update and next-bet code moved into `_record_bet_outcome` and `_next_bet_after`; the live loop and the backtest both call them, with the same WolfRider switch, rules and milestone hooks after each bet. Stop conditions use the same `should_stop`.
+- `duckctl backtest [args]`.
+
+N/A or not ported: duckdice's server roll scale and the real faucet balance (both need the network); WolfBet's Rich-panel session summary (the existing summary table carries the stop reason instead); recurring restarts inside a backtest (a stop ends it); WolfBet's later `--json` export report and multi-session backtest.
+
+**Tests**: `tests/test_wolfbet_sync_e6.py` (26). **431 total passing.**
+
+`VERSION` `1.12.2` -> `1.13.0`.
+
 ## CLI v1.12.2 - the base bet you set is the base bet it bets (2026-11-23)
 
 Mirrors WolfBet CLI v2.37.2. A base saved while the bot ran never reached it, a restart re-inflated a new base by every bump earned on the old one, and `--config-show` could not show what the daemon was betting.
