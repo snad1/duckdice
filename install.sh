@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────
-#  DuckDice AutoBot: Server Installer v3.1
+#  DuckDice AutoBot: Server Installer v3.2
 #  Sets up: CLI bot + Telegram bot, venv, systemd, duckctl
 # ─────────────────────────────────────────────────────────
 set -euo pipefail
 
 INSTALL_DIR="$HOME/duckdice-bot"
 SERVICE_NAME="duckdice"
+LANE_SERVICE_NAME="duckdice-lane"
 TG_SERVICE_NAME="duckdice-tg"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 DUCKCTL="$HOME/.local/bin/duckctl"
@@ -14,7 +15,7 @@ ENV_FILE="$INSTALL_DIR/.env"
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
-echo "║   DuckDice AutoBot: Server Installer v3.1        ║"
+echo "║   DuckDice AutoBot: Server Installer v3.2        ║"
 echo "║   CLI Bot + Telegram Bot                          ║"
 echo "╚══════════════════════════════════════════════════╝"
 echo ""
@@ -50,14 +51,6 @@ cp tg/formatter.py  "$INSTALL_DIR/tg/"
 cp tg/handlers.py   "$INSTALL_DIR/tg/"
 cp tg/bot.py        "$INSTALL_DIR/tg/"
 
-# Copy shared/ library (cross-bot shared modules)
-if [ -d "../shared" ]; then
-    rm -rf "$INSTALL_DIR/shared"
-    cp -r ../shared "$INSTALL_DIR/"
-    echo "   shared/ library copied"
-else
-    echo "   shared/ not copied locally (pip package used instead)"
-fi
 
 # ── 3. Environment file ───────────────────────────────
 echo "[3/7] Setting up environment..."
@@ -104,6 +97,9 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=${INSTALL_DIR}/venv/bin/python3 ${INSTALL_DIR}/duckdice.py --resume --daemon
 Restart=on-failure
@@ -121,6 +117,37 @@ EnvironmentFile=-${ENV_FILE}
 [Install]
 WantedBy=default.target
 SERVICEEOF
+
+# Parallel lanes 2..N: same unit as lane 1 plus --lane %i (duckctl lanes N)
+cat > "$SYSTEMD_DIR/${LANE_SERVICE_NAME}@.service" << LANESERVICEEOF
+[Unit]
+Description=DuckDice AutoBot - parallel lane %i (CLI)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=${INSTALL_DIR}/venv/bin/python3 ${INSTALL_DIR}/duckdice.py --resume --daemon --lane %i
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+Environment=HOME=${HOME}
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-${ENV_FILE}
+
+[Install]
+WantedBy=default.target
+LANESERVICEEOF
 
 # Telegram bot service
 cat > "$SYSTEMD_DIR/${TG_SERVICE_NAME}.service" << TGSERVICEEOF
@@ -178,9 +205,12 @@ WDTIMEREOF
 sudo loginctl enable-linger "$(whoami)" 2>/dev/null || true
 
 systemctl --user daemon-reload
+# Boot-enable only (no --now): a bot stopped by hand stays stopped until the next boot.
+systemctl --user enable ${SERVICE_NAME} 2>/dev/null || true
 systemctl --user enable --now ${TG_SERVICE_NAME}-watchdog.timer 2>/dev/null || true
 echo "   Services installed:"
 echo "     ${SERVICE_NAME}.service     (CLI bot)"
+echo "     ${LANE_SERVICE_NAME}@.service (parallel lanes 2..N)"
 echo "     ${TG_SERVICE_NAME}.service  (Telegram bot)"
 
 # ── 6. Management CLI ─────────────────────────────────
@@ -188,8 +218,7 @@ echo "[6/7] Creating duckctl management command..."
 mkdir -p "$HOME/.local/bin"
 
 if [ -f "duckctl" ]; then
-    cp duckctl "$DUCKCTL"
-    chmod +x "$DUCKCTL"
+    install -m 0755 duckctl "$DUCKCTL"
 else
     echo "   WARNING: duckctl not found in the repo; skipping the management CLI."
     exit 1

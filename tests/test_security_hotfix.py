@@ -230,7 +230,7 @@ class TestRedaction:
         installer = open(os.path.join(_ROOT, "install.sh"), encoding="utf-8").read()
         assert 'chmod 600 "$ENV_FILE"' in installer
         assert "CTLEOF" not in installer
-        assert 'cp duckctl "$DUCKCTL"' in installer
+        assert 'install -m 0755 duckctl "$DUCKCTL"' in installer
 
 
 class TestMinimumBetCap:
