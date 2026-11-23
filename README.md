@@ -1,4 +1,4 @@
-# DuckDice AutoBot v1.6.0 + Telegram Bot v1.8.0
+# DuckDice AutoBot v1.13.0 + Telegram Bot v1.10.1
 
 High-speed auto-betting engine for DuckDice.io Dice with a live dashboard, Telegram bot, and web admin panel. Runs on any server or local machine — leave it running and manage via CLI, Telegram, or browser.
 
@@ -95,6 +95,27 @@ duckctl monitor           # Attach live TUI to running daemon
 duckctl status            # Check running session status
 duckctl stats             # Session statistics (--since/--until DATE, --lane K)
 duckctl analytics         # Aggregates by game / strategy / lane, top 5 (same flags)
+duckctl restart             # Restart the bot (every lane)
+duckctl lanes [N] [--split none|budget|bet|both]  # Show or set parallel lanes (1-10)
+duckctl logs                # Stream live logs
+duckctl logs-full           # Show last 200 log lines
+duckctl diagnose            # Bottleneck analysis of the running session
+duckctl benchmark [N] [--lanes M]  # Time N probe requests
+duckctl doctor [--fix] [--yes]  # Health check; --fix applies safe fixes
+duckctl tmux                # Run monitor in a detachable tmux session
+duckctl config-set KEY=VALUE ...  # Change saved keys; a running daemon reloads
+duckctl session ID          # Full stats + streak distribution for a session
+duckctl last-bets [N]       # Last N bets across all sessions (default 20)
+duckctl presets             # List saved presets
+duckctl export PATH [SID]   # Export a session (CSV, or JSON by .json extension)
+duckctl backtest [args]     # Backtest / replay offline (no API calls, no real balance)
+duckctl cleanup [DAYS]      # Purge bet rows of old sessions (default: purge_days)
+duckctl reset [--yes]       # Archive the stats DB and start fresh (never deletes)
+duckctl archives            # List archived stats DBs
+duckctl run-reset [--yes]   # New run total for the run-wide profit increment
+duckctl update              # Pull, reinstall requirements, restart what was running
+duckctl refresh             # Reinstall duckctl from the repo copy in this folder
+duckctl version             # Bot and duckctl versions
 
 duckctl tg env            # Edit .env (set Telegram token)
 duckctl tg start          # Start Telegram bot
@@ -158,6 +179,9 @@ The Telegram bot provides full betting control from your phone. Each Telegram us
 | `/benchmark` | Test API response speed |
 | `/cleanup [days]` | Purge old bet records (default 3 days), keep session stats |
 | `/delsession <id>` | Delete a specific session and its bets |
+| `/update` | Pull the latest code and restart the bot (owner only) |
+| `/runreset` | Start a new run total for `piscope run` (asks to confirm; stop sessions first) |
+| `/tweak <param> <value>` | Change a setting of a running session (e.g. `/tweak delay 0.1`) |
 
 ---
 
@@ -240,6 +264,16 @@ python3 duckdice.py --daemon --lane 2 # Run lane 2 (lane 1 = classic paths)
 python3 duckdice.py --status --lane 2 # --status / --monitor / --stop per lane
 python3 duckdice.py --lanes-status    # One row per lane + total bps / P/L
 python3 duckdice.py --benchmark 20 --lanes 4  # Read-only probe at 1..4 clients
+python3 duckdice.py --version           # Print the version
+python3 duckdice.py --list-presets      # Show saved presets
+python3 duckdice.py --config-show       # Print the saved config (secrets masked)
+python3 duckdice.py --config-set piscope=run pi=0.0001 pt=0.001  # Run-wide profit increment (piscope=session keeps it per session)
+python3 duckdice.py --diagnose          # Bottleneck analysis of the running daemon
+python3 duckdice.py --cleanup [DAYS]    # Purge bet rows of sessions ended > DAYS ago (default purge_days)
+python3 duckdice.py --run-reset [--lane K]  # New run total for the run-wide profit increment
+python3 duckdice.py --export ~/s12.csv --export-session-id 12  # Export a session (.json = JSON, else CSV; default latest)
+python3 duckdice.py --backtest --simulate 10000 --seed 42  # Offline backtest: no API calls, no real balance
+python3 duckdice.py --backtest --replay-session 12  # Replay a stored session's outcomes offline
 ```
 
 Faucet mode can't run with lanes > 1 (the faucet balance can't be split): `--config-set lanes=N` and the start refuse it.
