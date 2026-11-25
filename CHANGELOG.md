@@ -1,5 +1,29 @@
 # Changelog
 
+## CLI v1.14.0 / duckctl v3.4 - named lanes, one lane at a time, pause / resume / reload (2026-11-25)
+
+Ports WolfBet's lane registry and one-lane verbs (WolfBet v2.48.0 to v2.49.0, wolfctl 3.22 to 3.24), the same code as goated 1.15.0, shuffle 1.14.0 and stake 1.17.0, plus wolfctl's `pause`, `resume` and `reload`. Needs casino-shared 0.10.0; with an older one the CLI prints `casino-shared 0.10.0 or newer is needed: run duckctl update` and exits 1. Every lane still shares one account.
+
+### Lanes
+- Lanes have an id and a name: `lanes: {split, max, next_id, items: {"<id>": {name, enabled, overrides}}}`. A config with `lanes.count` reads as lanes 1..count, as before; the first lane write keeps one copy at `~/.duckdice_autobot.json.pre-registry` (0600).
+- `duckctl lane add NAME [--from K]` adds one lane (copying lane K's overrides) and starts only it. Ids are never reused. With faucet mode on, `lane add` is refused like `lanes=N` is: the faucet balance can't be split.
+- `duckctl lane remove K` stops and disables only that lane: `Lane K stopped. Other lanes keep betting.` Lane 1 holds the base config and can't be removed.
+- `duckctl lane rename K NAME` (or `--config-set laneK.name=NAME`): the running lane reloads and logs `[L3 friend-A]`, with the API key still masked. The lanes table gains a Name column once a lane has its own name.
+- `duckctl start|stop|restart K` acts on one lane alone; plain `start|stop|restart` still act on every lane.
+- `duckctl lanes N` starts or stops only the difference and never restarts `duckdice`. With the `bet`/`both` split the running lanes reload their base bet share; `budget`/`both` print `Budget shares update when each lane restarts: duckctl restart K.`
+- The owner limit `lanes.max` (default 10, up to 99): `duckctl lanes --max N` or `--config-set lanes_max=N`. Lane ids go up to 99, for `--lane` and the `--stats --lane` filter too.
+- New bot flags: `--lane-ids [enabled|all]`, `--lane-add NAME [--lane-from K]`, `--lane-remove K`.
+
+### Pause, resume, reload
+- `duckctl pause|resume|reload [K|all]` sends USR1, USR2 or HUP to lane K, or to every lane with a pid file (the default). The daemon already handled these signals; there was no command to send them.
+- Only a pid whose `/proc/PID/cmdline` runs `duckdice.py` is signalled: a stale pid or another process is skipped with a reason, `No running lane matched.` exits 1, and a bad K exits 2 with the usage line.
+
+### Tests
+- `tests/test_lane_registry.py` (old shape read, `lanes=N` round trip, one-time backup, rename reloads one lane, add/remove, refusals write nothing, limit, ids above 10, `--lane-ids`, Name column, run reset, reload takes the count, an older casino-shared, the masked key on a named lane, lane add in faucet mode).
+- `tests/test_duckctl_lanes.py` (add starts only the new unit, remove disables only its lane, rename, one-lane stop/start/restart, unknown lanes reach no unit, bad arguments exit 2, `--max`).
+- `tests/test_duckctl_signals.py` (each verb reaches only the named lane, the default and `all` reach every running lane, stale, foreign and garbage pids are skipped, bad K exits 2).
+- `tests/test_wolfbet_sync_e5_lanes.py`, `tests/test_wolfbet_sync_e7.py` and `tests/test_portability_v1.py` updated for the registry shape, ids up to 99 and the one-lane delta.
+
 ## duckctl v3.3 + installer v3.2 - wolfctl 3.12 operations (2026-11-23)
 
 Mirrors wolfctl 3.12 and WolfBet's installer at CLI v2.37.2, as goatedctl 1.1 and cgctl 1.1 do. duckctl's `tg` commands (token in `~/duckdice-bot/.env`, `duckctl tg env`) and `web` are unchanged. `duckdice.py` is unchanged; every new command calls a flag it already has.

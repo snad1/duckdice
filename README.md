@@ -96,7 +96,10 @@ duckctl status            # Check running session status
 duckctl stats             # Session statistics (--since/--until DATE, --lane K)
 duckctl analytics         # Aggregates by game / strategy / lane, top 5 (same flags)
 duckctl restart             # Restart the bot (every lane)
-duckctl lanes [N] [--split none|budget|bet|both]  # Show or set parallel lanes (1-10)
+duckctl lanes [N] [--split none|budget|bet|both] [--max N]  # Show or set parallel lanes; only the difference starts or stops
+duckctl lane add NAME [--from K] | remove K | rename K NAME  # Change one lane; the others keep betting
+duckctl start|stop|restart K  # One lane alone (lane 1 is the duckdice service)
+duckctl pause|resume|reload [K|all]  # Pause or resume betting, or reload the saved config (default: every lane)
 duckctl logs                # Stream live logs
 duckctl logs-full           # Show last 200 log lines
 duckctl diagnose            # Bottleneck analysis of the running session
