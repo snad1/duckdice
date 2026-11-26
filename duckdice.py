@@ -97,7 +97,7 @@ LOG_DIR      = os.environ.get("DUCKDICE_LOG_DIR",      os.path.expanduser("~/.du
 # A lane's restart or removal request for its next session end (.laneK for lanes 2+).
 DRAIN_PATH   = os.environ.get("DUCKDICE_DRAIN_PATH", os.path.expanduser("~/.duckdice_autobot.drain"))
 CTL_PATH     = os.environ.get("DUCKDICE_DUCKCTL", os.path.expanduser("~/.local/bin/duckctl"))
-VERSION      = "1.17.0"
+VERSION      = "1.18.0"
 APP_ENV      = os.environ.get("APP_ENV", "production")
 
 # ── Daily rotating logger ──
@@ -2189,13 +2189,14 @@ def _db_start_session() -> int:
     c = conn.cursor()
     c.execute("""
         INSERT INTO sessions
-            (started_at, currency, game, strategy, base_bet, multiplier, start_balance, lane)
-        VALUES (?,?,?,?,?,?,?,?)
+            (started_at, currency, game, strategy, base_bet, multiplier, start_balance, lane, key_ref)
+        VALUES (?,?,?,?,?,?,?,?,?)
     """, (
         datetime.now().isoformat(),
         state.currency, state.game, state.strategy,
         state.base_bet, state.multiplier, state.start_balance,
         state.lane,
+        state.key_ref or VAULT_KEY_ID,
     ))
     conn.commit()
     sid = c.lastrowid
@@ -2482,6 +2483,7 @@ def _save_state_file():
             # v1.10.0 (WolfBet v2.35.0 / v2.36.0): parallel lanes
             "lane": state.lane,
             "lanes_count": state.lanes_count,
+            "key_ref": state.key_ref,
             "pending_restart": state.pending_restart,
             "code_version": VERSION,
             "lane_share": state.lane_share,
