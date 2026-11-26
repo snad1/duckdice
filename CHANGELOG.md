@@ -1,5 +1,12 @@
 # Changelog
 
+## duckctl v3.7 - removed lanes leave nothing behind (2026-11-26)
+
+- `duckctl lane remove K` deletes lane K's state, pid, run and session-end files once its unit stops. Its history stays in the database, and a remove the bot refuses keeps them.
+- `lane remove K --after-session` on a stopped lane removes it now (`Lane K is not running, so it is removed now.`): a stopped lane never reaches its session end.
+- `restart K --at-boundary` on a stopped lane answers `Lane K is stopped; start it with: duckctl start K` (exit 1). `--cancel-boundary` still works on it.
+- `duckctl reset` moves the database's `-wal` and `-shm` with it to the archive name, so the new database never reads the old log, and drops every session-end request.
+
 ## CLI v1.16.0 / duckctl v3.6 - restart class, session-end restart, rolling update (2026-11-26)
 
 Ports stake 1.19.0's restart class, session-end restart and rolling update (the same code as goated 1.17.0 and shuffle 1.16.0). casino-shared already holds the drain helpers, so no shared change.
