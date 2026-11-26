@@ -60,8 +60,8 @@ def _signal_handler(signum, frame):
 
 def main():
     if not BOT_TOKEN:
-        print("Error: Set DUCKDICE_TG_TOKEN environment variable")
-        print("  export DUCKDICE_TG_TOKEN='your_telegram_bot_token'")
+        print("Error: no Telegram bot token. Add it with: duckctl key add telegram --kind telegram")
+        print("  or set DUCKDICE_TG_TOKEN in the environment")
         sys.exit(1)
 
     os.makedirs(DATA_DIR, exist_ok=True)

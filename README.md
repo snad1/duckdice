@@ -98,6 +98,7 @@ duckctl analytics         # Aggregates by game / strategy / lane, top 5 (same fl
 duckctl restart             # Restart the bot (every lane)
 duckctl lanes [N] [--split none|budget|bet|both] [--max N]  # Show or set parallel lanes; only the difference starts or stops
 duckctl lane add NAME [--from K] | remove K | rename K NAME  # Change one lane; the others keep betting
+duckctl key list | add ID [--label L] [--kind key|proxy|telegram] | rotate ID | delete ID  # Host vault: API keys, proxies, the Telegram token (hidden prompt)
 duckctl start|stop|restart K  # One lane alone (lane 1 is the duckdice service)
 duckctl pause|resume|reload [K|all]  # Pause or resume betting, or reload the saved config (default: every lane)
 duckctl logs                # Stream live logs
@@ -145,7 +146,7 @@ The Telegram bot provides full betting control from your phone. Each Telegram us
 
 1. Open Telegram, search **@BotFather**, `/newbot`
 2. Choose a name and username, copy the token
-3. On your server: `duckctl tg env` and set `DUCKDICE_TG_TOKEN=<token>`
+3. On your server: `duckctl key add telegram --kind telegram` (hidden prompt; the host vault keeps it), or `duckctl tg env` and set `DUCKDICE_TG_TOKEN=<token>`
 4. `duckctl tg start`
 5. Open your bot in Telegram and `/start`
 
@@ -192,7 +193,7 @@ The Telegram bot provides full betting control from your phone. Each Telegram us
 
 | Variable | Default | Description |
 |---|---|---|
-| `DUCKDICE_API_KEY` | *(none)* | API key from DuckDice settings |
+| `DUCKDICE_API_KEY` | *(none)* | API key from DuckDice settings. Read once: lane 1 moves it into the host vault on start; then remove it from `~/duckdice-bot/.env` |
 | `DUCKDICE_API_BASE` | `https://duckdice.io/api` | API base URL |
 | `DUCKDICE_DB_PATH` | `~/.duckdice_autobot.db` | SQLite database path |
 | `DUCKDICE_CONFIG_PATH` | `~/.duckdice_autobot.json` | Saved config path |

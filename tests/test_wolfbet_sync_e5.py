@@ -604,7 +604,8 @@ def test_config_set_writes_disk_and_sighups_daemon(saved_config, out, monkeypatc
     cg.cmd_config_set(["delay=0.2", "maxloss=0.5", "recdelay=99999"])
     data = json.load(open(cg.CONFIG_PATH))
     assert data["bet_delay"] == 0.2 and data["max_loss"] == 0.5 and data["recurring_delay"] == 86400
-    assert data["api_key"] == LONG_KEY
+    assert "api_key" not in data                      # the host vault holds it now
+    assert cg.Vault(cg.VAULT_SERVICE).secret(cg.VAULT_KEY_ID) == LONG_KEY
     assert sent == [(4242, cg.signal.SIGHUP)]
     text = out.getvalue()
     assert "Config updated" in text and "Daemon reloaded live config" in text and "⚠" in text
@@ -614,7 +615,8 @@ def test_config_set_never_persists_env_key(saved_config, out, monkeypatch):
     saved_config()
     monkeypatch.setenv("DUCKDICE_API_KEY", "ENVKEY-0000000000000000")
     cg.cmd_config_set(["delay=0"])
-    assert json.load(open(cg.CONFIG_PATH))["api_key"] == LONG_KEY
+    assert "ENVKEY" not in open(cg.CONFIG_PATH).read()
+    assert cg.Vault(cg.VAULT_SERVICE).secret(cg.VAULT_KEY_ID) == LONG_KEY   # the saved key wins
 
 
 def test_config_set_restart_note_for_unsafe_keys(saved_config, out):

@@ -49,11 +49,11 @@ def _mk_engine(db):
 
 # ── VERSION ───────────────────────────────────────────────
 def test_cli_version():
-    assert dd.VERSION == "1.14.0"
+    assert dd.VERSION == "1.15.0"
 
 
 def test_tg_version():
-    assert tg.VERSION == "1.10.1"
+    assert tg.VERSION == "1.11.0"
 
 
 # ── PRAGMAs ───────────────────────────────────────────────

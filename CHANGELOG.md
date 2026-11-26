@@ -1,5 +1,29 @@
 # Changelog
 
+## CLI v1.15.0 / TG v1.11.0 / duckctl v3.5 - API key vault, per-lane account (2026-11-26)
+
+Ports shuffle 1.15.0's key vault and per-lane account (the same code as goated 1.16.0). Needs casino-shared 0.11.0; with an older one the CLI prints `casino-shared 0.11.0 or newer is needed: run duckctl update` and exits 1.
+
+### Key vault
+- The API key lives in the host vault (`~/.casino-vault/duckdice/`, 0600, encrypted) as `default`. On lane 1's start a key in the config file is moved there once it reads back equal; `api_key` leaves the config and one copy stays at `~/.duckdice_autobot.json.pre-vault` (0600).
+- `DUCKDICE_API_KEY` from the environment is moved into the vault the same way. Once the vault holds the key it wins, and each lane 1 start says `DUCKDICE_API_KEY is still set: the vault holds the key now, remove it from ~/duckdice-bot/.env`. An env key is never written to the config file, even when the vault can't be used.
+- `duckctl key list | add ID [--label L] [--kind key|proxy|telegram] | rotate ID | delete ID`: the secret is read through a hidden prompt and reaches the bot on stdin only, never in argv or a log. `list` shows id, kind, label, last 4 and the lanes using each entry; a key in use can't be deleted; the Telegram token is only `telegram`.
+- `--config-set` refuses `api_key` with or without a `laneK.` prefix.
+
+### Per-lane account
+- A lane may bet from its own key (`laneK.key_ref=ID`), currency (`laneK.currency=`) and proxy (`laneK.proxy=` or a vault proxy with `laneK.proxy_ref=ID`). A proxy with a password is refused as a plain value: it goes in the vault.
+- A key or vault proxy that isn't in the vault is refused (`Invalid lane3 override: no key named nobody in the vault`), nothing is saved; a lane whose key is gone exits at start instead of betting from another account. A lane on its own key never falls back to the env key.
+- A config-set that changes a running lane's key, currency or vault proxy restarts only that lane: `Lane 3 restarted: its key, currency or proxy changed.`
+- Splits (budget share, risky-config check, `basebet_pct`) count only the enabled lanes on the same key and currency. The faucet stays shared and can't be set per lane.
+
+### Telegram
+- The Telegram bot reads its token from the vault (`duckctl key add telegram --kind telegram`), then `DUCKDICE_TG_TOKEN`.
+
+### Tests
+- `tests/test_lane_accounts.py` (migration and backup, broken vault, lanes 2+ never write the vault, own key / currency / proxy, account split, missing key or proxy, vault proxy never written, refusals without echo, restart of the changed lane only, key verbs, Telegram token, env key moved and never written, vault beats env, own key ignores env, a lane key masked in logs).
+- `tests/test_duckctl_lanes.py` (`key add` and `rotate` send the secret on stdin only, bad `key` arguments exit 2).
+- `tests/conftest.py` points the vault at each test's tmp dir; e5, e5_lanes, e7, e9, portability and registry tests updated.
+
 ## CLI v1.14.0 / duckctl v3.4 - named lanes, one lane at a time, pause / resume / reload (2026-11-25)
 
 Ports WolfBet's lane registry and one-lane verbs (WolfBet v2.48.0 to v2.49.0, wolfctl 3.22 to 3.24), the same code as goated 1.15.0, shuffle 1.14.0 and stake 1.17.0, plus wolfctl's `pause`, `resume` and `reload`. Needs casino-shared 0.10.0; with an older one the CLI prints `casino-shared 0.10.0 or newer is needed: run duckctl update` and exits 1. Every lane still shares one account.

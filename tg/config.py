@@ -5,9 +5,22 @@ import logging
 
 from shared.tg.redact import RedactingFormatter
 
+TG_KEY_ID = "telegram"
+
+
+def bot_token() -> str:
+    """The bot token from the host key vault, else DUCKDICE_TG_TOKEN; never logged."""
+    try:
+        from shared.core.vault import vault_secret
+    except ImportError:
+        return os.environ.get("DUCKDICE_TG_TOKEN", "")
+    token = vault_secret("duckdice", TG_KEY_ID, "telegram", log=logging.getLogger("duckbot"))
+    return token or os.environ.get("DUCKDICE_TG_TOKEN", "")
+
+
 # ── Environment ──────────────────────────────────────────
 APP_ENV    = os.environ.get("APP_ENV", "production")
-BOT_TOKEN  = os.environ.get("DUCKDICE_TG_TOKEN", "")
+BOT_TOKEN  = bot_token()
 DATA_DIR   = os.environ.get("DUCKDICE_TG_DATA", os.path.expanduser("~/.duckbot_tg"))
 API_BASE   = os.environ.get("DUCKDICE_API_BASE", "https://duckdice.io/api")
 WEB_URL    = os.environ.get("DUCKDICE_WEB_URL", "")          # e.g. http://IP:8002
