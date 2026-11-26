@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DuckDice AutoBot: Management Command v3.5
+# DuckDice AutoBot: Management Command v3.6
 # Wrapped in { } so bash reads entire script before executing -
 # prevents corruption when cmd_update replaces this file mid-run.
 {
@@ -24,7 +24,7 @@ DB="$HOME/.duckdice_autobot.db"
 SCRIPT_NAME="duckctl"
 # Grep-parsed by update / refresh / doctor to spot an installed copy older
 # than the repo copy: keep the format `DUCKCTL_VERSION=X.Y`.
-DUCKCTL_VERSION=3.5
+DUCKCTL_VERSION=3.6
 
 usage() {
     echo ""
@@ -37,8 +37,9 @@ usage() {
     echo "    duckctl start [K]   Start the bot as a daemon (every lane, or lane K alone)"
     echo "    duckctl stop [K]    Stop the bot (every lane, or lane K alone)"
     echo "    duckctl restart [K] Restart the bot (every lane, or lane K alone)"
+    echo "    duckctl restart K --at-boundary | --cancel-boundary   Restart lane K when its session ends"
     echo "    duckctl lanes [N] [--split none|budget|bet|both] [--max N]   Show or set parallel lanes"
-    echo "    duckctl lane add NAME [--from K] | remove K | rename K NAME   Change one lane; the others keep betting"
+    echo "    duckctl lane add NAME [--from K] | remove K [--after-session] | rename K NAME   Change one lane; the others keep betting"
     echo "    duckctl pause|resume|reload [K|all]   Pause or resume betting, or reload the saved config (default: every lane)"
     echo "    duckctl preset NAME Load a named preset and start as a daemon"
     echo ""
@@ -80,7 +81,8 @@ usage() {
     echo "    duckctl run-reset [--yes]  New run total for the run-wide profit increment"
     echo ""
     echo "  MAINTENANCE:"
-    echo "    duckctl update      Pull, reinstall requirements, restart what was running"
+    echo "    duckctl update      Pull and reinstall; each lane restarts on the new code at its session end"
+    echo "    duckctl update --critical   Same, but restart every lane now"
     echo "    duckctl refresh     Reinstall duckctl from the repo copy in this folder"
     echo "    duckctl version     Bot and duckctl versions"
     echo ""
@@ -401,8 +403,12 @@ cmd_lane() {
             ;;
         remove)
             k="${1:-}"
-            case "$k" in ''|*[!0-9]*) echo "Usage: duckctl lane remove K" >&2; exit 2 ;; esac
-            [ $# -eq 1 ] || { echo "Usage: duckctl lane remove K" >&2; exit 2; }
+            case "$k" in ''|*[!0-9]*) echo "Usage: duckctl lane remove K [--after-session]" >&2; exit 2 ;; esac
+            if [ "${2:-}" = "--after-session" ] && [ $# -eq 2 ]; then
+                "$PYTHON" "$BOT" --lane-drain "$((10#$k))" remove
+                exit $?
+            fi
+            [ $# -eq 1 ] || { echo "Usage: duckctl lane remove K [--after-session]" >&2; exit 2; }
             k=$((10#$k))
             "$PYTHON" "$BOT" --lane-remove "$k" || exit $?
             systemctl --user disable --now "${LANE_SERVICE}@${k}" >/dev/null 2>&1 || true
@@ -420,7 +426,7 @@ cmd_lane() {
             "$PYTHON" "$BOT" --config-set "lane${k}.name=$name"
             ;;
         *)
-            echo "Usage: duckctl lane add NAME [--from K] | remove K | rename K NAME" >&2
+            echo "Usage: duckctl lane add NAME [--from K] | remove K [--after-session] | rename K NAME" >&2
             exit 2
             ;;
     esac
@@ -522,6 +528,18 @@ cmd_stop() {
 }
 
 cmd_restart() {
+    case "${2:-}" in
+        --at-boundary|--cancel-boundary)
+            case "${1:-}" in ''|*[!0-9]*) echo "Usage: duckctl restart K [--at-boundary|--cancel-boundary]" >&2; exit 2 ;; esac
+            [ $# -eq 2 ] || { echo "Usage: duckctl restart K [--at-boundary|--cancel-boundary]" >&2; exit 2; }
+            local action=restart
+            [ "$2" = "--cancel-boundary" ] && action=cancel
+            "$PYTHON" "$BOT" --lane-drain "$((10#$1))" "$action"
+            return $?
+            ;;
+        '') ;;
+        *) echo "Usage: duckctl restart K [--at-boundary|--cancel-boundary]" >&2; exit 2 ;;
+    esac
     if [ -n "${1:-}" ]; then cmd_lane_unit restart "$1"; return; fi
     stop_all_lanes
     systemctl --user restart "$SERVICE"
@@ -1027,7 +1045,28 @@ cmd_refresh() {
     echo "duckctl $DUCKCTL_VERSION -> ${repo_ver:-unknown} installed at $installed"
 }
 
+# Ask every running lane to restart on the new code when its own session ends.
+roll_lanes() {
+    local k
+    for k in $(lane_ids); do
+        systemctl --user is-active --quiet "$(lane_unit "$k")" 2>/dev/null || continue
+        if "$PYTHON" "$BOT" --lane-drain "$k" restart >/dev/null; then
+            echo "Lane $k restarts on the new code when its session ends."
+        else
+            echo "Lane $k: could not ask for a restart; it stays on the old code until restarted." >&2
+        fi
+    done
+    echo "Betting goes on; use duckctl update --critical to restart every lane now."
+}
+
 cmd_update() {
+    local critical=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --critical) critical=1; shift ;;
+            *) echo "Usage: duckctl update [--critical]" >&2; exit 2 ;;
+        esac
+    done
     if git rev-parse --is-inside-work-tree &>/dev/null; then
         echo "Pulling latest from git..."
         if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -1138,9 +1177,11 @@ cmd_update() {
         echo "Updated. TG bot not running (skipped restart)."
     fi
 
-    # Restart the CLI daemon (and its lanes) so it runs the new duckdice.py;
-    # --resume keeps the session.
-    if systemctl --user is-active --quiet "$SERVICE" 2>/dev/null; then
+    # Each lane restarts on the new duckdice.py at its own session end; --critical restarts
+    # every lane now (--resume keeps the session).
+    if systemctl --user is-active --quiet "$SERVICE" 2>/dev/null && [ "$critical" = "0" ]; then
+        roll_lanes
+    elif systemctl --user is-active --quiet "$SERVICE" 2>/dev/null; then
         stop_all_lanes
         systemctl --user restart "$SERVICE"
         sleep 1
@@ -1355,7 +1396,7 @@ case "${1:-}" in
     setup)        cmd_setup ;;
     start)        cmd_start "${2:-}" ;;
     stop)         cmd_stop "${2:-}" ;;
-    restart)      cmd_restart "${2:-}" ;;
+    restart)      shift; cmd_restart "$@" ;;
     status)       cmd_status ;;
     monitor)      cmd_monitor "${2:-}" ;;
     lanes)        shift; cmd_lanes "$@" ;;
@@ -1387,7 +1428,7 @@ case "${1:-}" in
     archives)     cmd_archives ;;
     refresh)      cmd_refresh ;;
     version|--version|-v) cmd_version ;;
-    update)       cmd_update ;;
+    update)       shift; cmd_update "$@" ;;
     start-all)    cmd_start_all ;;
     stop-all)     cmd_stop_all ;;
     status-all)   cmd_status_all ;;

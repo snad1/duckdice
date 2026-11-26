@@ -96,8 +96,9 @@ duckctl status            # Check running session status
 duckctl stats             # Session statistics (--since/--until DATE, --lane K)
 duckctl analytics         # Aggregates by game / strategy / lane, top 5 (same flags)
 duckctl restart             # Restart the bot (every lane)
+duckctl restart K --at-boundary | --cancel-boundary  # Restart lane K when its session ends
 duckctl lanes [N] [--split none|budget|bet|both] [--max N]  # Show or set parallel lanes; only the difference starts or stops
-duckctl lane add NAME [--from K] | remove K | rename K NAME  # Change one lane; the others keep betting
+duckctl lane add NAME [--from K] | remove K [--after-session] | rename K NAME  # Change one lane; the others keep betting
 duckctl key list | add ID [--label L] [--kind key|proxy|telegram] | rotate ID | delete ID  # Host vault: API keys, proxies, the Telegram token (hidden prompt)
 duckctl start|stop|restart K  # One lane alone (lane 1 is the duckdice service)
 duckctl pause|resume|reload [K|all]  # Pause or resume betting, or reload the saved config (default: every lane)
@@ -117,7 +118,8 @@ duckctl cleanup [DAYS]      # Purge bet rows of old sessions (default: purge_day
 duckctl reset [--yes]       # Archive the stats DB and start fresh (never deletes)
 duckctl archives            # List archived stats DBs
 duckctl run-reset [--yes]   # New run total for the run-wide profit increment
-duckctl update              # Pull, reinstall requirements, restart what was running
+duckctl update              # Pull and reinstall; each lane restarts on the new code at its session end
+duckctl update --critical   # Same, but restart every lane now
 duckctl refresh             # Reinstall duckctl from the repo copy in this folder
 duckctl version             # Bot and duckctl versions
 

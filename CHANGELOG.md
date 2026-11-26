@@ -1,5 +1,28 @@
 # Changelog
 
+## CLI v1.16.0 / duckctl v3.6 - restart class, session-end restart, rolling update (2026-11-26)
+
+Ports stake 1.19.0's restart class, session-end restart and rolling update (the same code as goated 1.17.0 and shuffle 1.16.0). casino-shared already holds the drain helpers, so no shared change.
+
+### What a change costs
+- Every setting has one class in `_SETTINGS`: live (a running lane re-reads it on SIGHUP), lane (the lane picks it up when it restarts: currency, game, rule, multiplier, bet_value, strategy, strategy_key, win_mult, loss_mult, delay_martin_threshold, profit_increment_scope, key_ref, proxy_ref) or service (`api_key` and `faucet`: shared, every lane restarts). The live-reload and per-lane lists are derived from it and unchanged; no setting changes how it applies.
+- `duckctl config-set` names what needs a restart: `Restart every lane to apply: multiplier (duckctl restart).`, `Restart lane 2 to apply: loss_mult (duckctl restart 2).`; live changes print no restart line.
+- A running lane records the saved changes it still waits on; `duckctl lanes` shows `Lane 2 waits for a restart: multiplier 2.0 -> 3.0 (duckctl restart 2)` until it restarts. The API key is never listed.
+
+### Session-end restart and removal
+- `duckctl restart K --at-boundary` re-executes lane K in place when its session ends (`--cancel-boundary` forgets it); `duckctl lane remove K --after-session` removes it then. With recurring off the restart is dropped and the lane stops as usual. The request (`~/.duckdice_autobot.drain`, `.laneK` for lanes 2+, 0600; `DUCKDICE_DRAIN_PATH`) is read once per session close, never per bet.
+- New bot flag: `--lane-drain K restart|remove|cancel`.
+
+### Rolling update
+- `duckctl update` asks each running lane to restart on the new code at its own session end; the lanes table's Code column goes `old` -> `waiting for session end` -> `new`. `duckctl update --critical` restarts every lane now, as before.
+
+### Not ported
+- A saved `events_url` beating the env (no events feed), the per-session `config_snapshot` (no column, no consumer) and the rollout in a JSON config view (no JSON config view).
+
+### Tests
+- `tests/test_lane_restarts.py` (the table and derived lists pinned, notes per class, pending changes recorded with the key hidden, waiting line and Code column, drain request / cancel / refusals, `_session_boundary` restart, removal, dropped final restart and another lane's request, the loop restarting at the session end and stopping as before with recurring off).
+- `tests/test_duckctl_lanes.py` (boundary verbs, rolling and critical update, a stopped bot asks no lane, bad arguments exit 2); e5, e7 and portability pins updated.
+
 ## CLI v1.15.0 / TG v1.11.0 / duckctl v3.5 - API key vault, per-lane account (2026-11-26)
 
 Ports shuffle 1.15.0's key vault and per-lane account (the same code as goated 1.16.0). Needs casino-shared 0.11.0; with an older one the CLI prints `casino-shared 0.11.0 or newer is needed: run duckctl update` and exits 1.
