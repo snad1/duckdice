@@ -49,7 +49,7 @@ def _mk_engine(db):
 
 # ── VERSION ───────────────────────────────────────────────
 def test_cli_version():
-    assert dd.VERSION == "1.18.0"
+    assert dd.VERSION == "1.19.0"
 
 
 def test_tg_version():
@@ -316,7 +316,7 @@ def test_since_until_are_modifiers_not_commands():
     src = inspect.getsource(dd)
     assert re.search(r'parser\.add_argument\("--since"', src)
     assert not re.search(r'group\.add_argument\("--since"', src)
-    assert "cmd_stats(since=args.since, until=args.until, lane=args.lane)" in src
+    assert "cmd_stats(since=args.since, until=args.until, lane=args.lane, as_json=args.json," in src
 
 
 def test_tg_analytics_parses_args_and_threads_where():
